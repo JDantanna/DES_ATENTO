@@ -1,0 +1,26 @@
+name: release
+
+# Publica uma release com o instalador ao criar uma tag, ex.: git tag v0.2.0 && git push --tags
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Instalar Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Compilar e gerar instalador
+        shell: pwsh
+        run: ./build.ps1
+      - name: Publicar release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Des_Atento_Setup.exe
