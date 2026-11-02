@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 /// Repositório "usuario/nome" que publica as releases. Troque pelo seu.
-const REPO: &str = "SEU_USUARIO/Des_Atento";
+const REPO: &str = "JDantanna/DES_ATENTO";
 const ASSET: &str = "Des_Atento_Setup.exe";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -38,9 +38,6 @@ fn parse(v: &str) -> Vec<u32> {
 }
 
 fn check_blocking() -> Result<State, String> {
-    if REPO.starts_with("SEU_USUARIO") {
-        return Err("Repositório do GitHub ainda não configurado (src/updater.rs).".into());
-    }
     let out = curl()
         .args(["-sSL", "--max-time", "15", "-H", "User-Agent: Des_Atento", "-H", "Accept: application/vnd.github+json"])
         .arg(format!("https://api.github.com/repos/{REPO}/releases/latest"))
