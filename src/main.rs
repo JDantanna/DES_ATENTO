@@ -1,7 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod coach;
+mod ics;
 mod model;
+mod notify;
 mod planner;
 mod splash;
 mod tasks;
@@ -41,6 +43,7 @@ struct App {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
+        notify::start();
         let store = Store::load();
         let today = store.today_titles(Local::now().date_naive());
         Self {

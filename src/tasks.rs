@@ -1,6 +1,7 @@
 use chrono::{Local, NaiveDate, NaiveTime};
 use eframe::egui::{self, Color32, RichText};
 
+use crate::ics;
 use crate::model::{Store, Subtask, Task};
 
 #[derive(PartialEq, Clone, Copy)]
@@ -21,6 +22,7 @@ pub struct TasksView {
     tag_buf: String,
     sub_buf: String,
     buf_for: Option<u64>,
+    msg: Option<String>,
 }
 
 impl TasksView {
@@ -35,6 +37,7 @@ impl TasksView {
             tag_buf: String::new(),
             sub_buf: String::new(),
             buf_for: None,
+            msg: None,
         }
     }
 
@@ -76,7 +79,11 @@ impl TasksView {
             ui.selectable_value(&mut self.filter, Filter::Pendentes, "Pendentes");
             ui.selectable_value(&mut self.filter, Filter::Todas, "Todas");
             ui.selectable_value(&mut self.filter, Filter::Concluidas, "Concluídas");
+            ui.menu_button("⇅ Calendário", |ui| self.ics_menu(ui, store));
         });
+        if let Some(m) = &self.msg {
+            ui.weak(m);
+        }
         let tags = store.all_tags();
         if !tags.is_empty() {
             ui.horizontal_wrapped(|ui| {
@@ -149,6 +156,33 @@ impl TasksView {
             }
         });
         store.dirty |= dirty;
+    }
+
+    fn ics_menu(&mut self, ui: &mut egui::Ui, store: &mut Store) {
+        ui.weak("Google Calendar, Outlook, Apple...");
+        if ui.button("Importar arquivo .ics").clicked() {
+            ui.close();
+            if let Some(path) = rfd::FileDialog::new().add_filter("Calendário", &["ics"]).pick_file() {
+                self.msg = Some(match std::fs::read_to_string(&path) {
+                    Ok(text) => {
+                        let items = ics::parse(&text);
+                        let n = items.len();
+                        let added = ics::import_into(store, items);
+                        format!("Importados {added} de {n} eventos.")
+                    }
+                    Err(e) => format!("Não foi possível ler o arquivo: {e}"),
+                });
+            }
+        }
+        if ui.button("Exportar tarefas com data (.ics)").clicked() {
+            ui.close();
+            if let Some(path) = rfd::FileDialog::new().add_filter("Calendário", &["ics"]).set_file_name("des_atento.ics").save_file() {
+                self.msg = Some(match std::fs::write(&path, ics::export(store)) {
+                    Ok(()) => "Exportado.".to_owned(),
+                    Err(e) => format!("Falha ao salvar: {e}"),
+                });
+            }
+        }
     }
 
     fn sync_buffers(&mut self, t: &Task) {
