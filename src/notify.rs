@@ -28,7 +28,7 @@ $t::CreateToastNotifier($app).Show($toast)
 
 #[cfg(windows)]
 pub fn toast(title: &str, body: &str) {
-    crate::sound::play(crate::sound::Sound::HeyListen);
+    crate::sound::notification();
     use std::os::windows::process::CommandExt;
     let _ = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", TOAST])

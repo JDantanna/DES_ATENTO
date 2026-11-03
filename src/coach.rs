@@ -29,6 +29,8 @@ pub struct CoachView {
     range: Range,
     widget: bool,
     widget_list: bool,
+    /// O widget acabou de ser aberto (o app principal vai para a bandeja).
+    just_opened: bool,
     icons: HashMap<String, egui::TextureHandle>,
 }
 
@@ -100,7 +102,11 @@ fn key(d: chrono::NaiveDate) -> String {
 
 impl CoachView {
     pub fn new() -> Self {
-        Self { range: Range::Hoje, widget: false, widget_list: false, icons: HashMap::new() }
+        Self { range: Range::Hoje, widget: false, widget_list: false, just_opened: false, icons: HashMap::new() }
+    }
+
+    pub fn take_opened(&mut self) -> bool {
+        std::mem::take(&mut self.just_opened)
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, tracker: &Tracker) {
@@ -118,8 +124,7 @@ impl CoachView {
                     if fairy_button(ui, self.widget) {
                         self.widget = !self.widget;
                         if self.widget {
-                            // Abre o widget e recolhe a janela principal.
-                            ui.ctx().send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Minimized(true));
+                            self.just_opened = true;
                         }
                     }
                 });

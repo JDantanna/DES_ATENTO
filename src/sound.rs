@@ -113,6 +113,22 @@ pub fn play(sound: Sound) {
     }
 }
 
+/// Som de aviso: sorteia entre Hello, Hey e Hey listen, sem repetir o anterior.
+pub fn notification() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static LAST: AtomicUsize = AtomicUsize::new(usize::MAX);
+    const POOL: [Sound; 3] = [Sound::Hello, Sound::Hey, Sound::HeyListen];
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos() as usize);
+    let mut i = nanos % POOL.len();
+    if i == LAST.load(Ordering::Relaxed) {
+        i = (i + 1) % POOL.len();
+    }
+    LAST.store(i, Ordering::Relaxed);
+    play(POOL[i]);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

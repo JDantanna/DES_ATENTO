@@ -12,6 +12,7 @@ mod sound;
 mod splash;
 mod tasks;
 mod theme;
+mod tray;
 mod tracker;
 mod updater;
 
@@ -43,6 +44,8 @@ struct App {
     tracker: Tracker,
     updater: Updater,
     logo: egui::TextureHandle,
+    tray: Option<tray::Tray>,
+    ask_minimize: bool,
 }
 
 impl App {
@@ -66,6 +69,8 @@ impl App {
             tracker: Tracker::start(),
             updater: Updater::default(),
             logo,
+            tray: None,
+            ask_minimize: false,
         }
     }
 
@@ -98,6 +103,47 @@ impl App {
                     }
                     _ => {}
                 }
+            }
+        }
+    }
+
+    fn go_tray(&mut self, ctx: &egui::Context) {
+        if self.tray.is_none() {
+            self.tray = tray::enter(ctx, include_bytes!("../assets/icon64.rgba"));
+        }
+        // Sem bandeja disponível, ao menos minimiza.
+        if self.tray.is_none() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
+    }
+
+    fn minimize_dialog(&mut self, ctx: &egui::Context) {
+        let mut choice = None;
+        egui::Window::new("Minimizar o Navi")
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Para onde o Navi deve ir?");
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Bandeja do sistema").clicked() {
+                        choice = Some(true);
+                    }
+                    if ui.button("Só minimizar").clicked() {
+                        choice = Some(false);
+                    }
+                    if ui.add(egui::Button::new("Cancelar").frame(false)).clicked() {
+                        self.ask_minimize = false;
+                    }
+                });
+            });
+        if let Some(to_tray) = choice {
+            self.ask_minimize = false;
+            if to_tray {
+                self.go_tray(ctx);
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             }
         }
     }
@@ -137,7 +183,7 @@ impl App {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
                     }
                     if chrome::window_button(ui, chrome::Glyph::Minimize).clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                        self.ask_minimize = true;
                     }
                     ui.add_space(8.0);
                     self.update_ui(ui);
@@ -169,6 +215,15 @@ impl eframe::App for App {
             return;
         }
 
+        match tray::take_request() {
+            Some(tray::Request::Restore) => {
+                tray::leave();
+                self.tray = None;
+            }
+            Some(tray::Request::Quit) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
+            None => {}
+        }
+
         self.title_bar(ui, maximized);
 
         match self.tab {
@@ -183,6 +238,14 @@ impl eframe::App for App {
         }
 
         self.coach.floating(ui, &self.tracker);
+        if self.coach.take_opened() {
+            let ctx = ui.ctx().clone();
+            self.go_tray(&ctx);
+        }
+        if self.ask_minimize {
+            let ctx = ui.ctx().clone();
+            self.minimize_dialog(&ctx);
+        }
 
         if self.store.dirty {
             self.store.save();

@@ -27,6 +27,8 @@ pub struct Splash {
     start: Option<f64>,
     /// Instante do clique que encerra a abertura (inicia o fade final).
     leaving: Option<f64>,
+    /// O "Hey" já tocou (uma vez, quando a data termina de aparecer).
+    greeted: bool,
     header: String,
     tasks: Vec<String>,
     /// Intervalo entre o surgimento de uma tarefa e a seguinte.
@@ -52,7 +54,7 @@ impl Splash {
             tasks.push(format!("e mais {extra}..."));
         }
         let gap = (0.5f32).min(3.5 / tasks.len() as f32);
-        Self { start: None, leaving: None, header, tasks, gap }
+        Self { start: None, leaving: None, greeted: false, header, tasks, gap }
     }
 
     fn task_start(&self, i: usize) -> f32 {
@@ -67,6 +69,11 @@ impl Splash {
         let now = ctx.input(|i| i.time);
         let start = *self.start.get_or_insert(now);
         let t = (now - start) as f32;
+
+        if !self.greeted && t >= HEAD_FADE_IN {
+            self.greeted = true;
+            crate::sound::play(crate::sound::Sound::Hey);
+        }
 
         let advance = ctx.input(|i| {
             i.pointer.any_click() || i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Enter)
