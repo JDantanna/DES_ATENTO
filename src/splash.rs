@@ -27,7 +27,7 @@ pub struct Splash {
     start: Option<f64>,
     /// Instante do clique que encerra a abertura (inicia o fade final).
     leaving: Option<f64>,
-    /// O "Hey" já tocou (uma vez, quando a data termina de aparecer).
+    /// O som de boas-vindas já tocou (uma vez, quando a data termina de aparecer).
     greeted: bool,
     header: String,
     tasks: Vec<String>,
@@ -72,7 +72,7 @@ impl Splash {
 
         if !self.greeted && t >= HEAD_FADE_IN {
             self.greeted = true;
-            crate::sound::play(crate::sound::Sound::Hey);
+            crate::sound::play(crate::sound::Sound::BemVindo);
         }
 
         let advance = ctx.input(|i| {

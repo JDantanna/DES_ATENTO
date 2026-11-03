@@ -1,8 +1,7 @@
-//! Sons da Navi como tilintares de sinos, gerados em memória (sem arquivo de áudio).
+//! Sons do app: tilintares de sino compostos para o Navi, gerados em memória (sem arquivo de áudio).
 //!
-//! Cada som é uma frase de poucas notas, na mesma estética do "Hey, listen!" original
-//! deste app: sinos sintéticos (seno + harmônicos que decaem). Os nomes seguem as falas
-//! da Navi; para usar um som numa situação do app, é só chamar `play(Sound::X)`.
+//! Cada som é uma frase curta de notas, com sinos sintéticos (seno + harmônicos que decaem).
+//! Para usar um som numa situação do app, é só chamar `play(Sound::X)`.
 
 use std::sync::OnceLock;
 
@@ -10,57 +9,63 @@ const RATE: u32 = 22_050;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Sound {
-    Hey,
-    Listen,
-    HeyListen,
-    Hello,
-    WatchOut,
+    /// Arpejo ascendente: abertura do app.
+    BemVindo,
+    /// Três notas subindo: aviso de tarefa.
+    Lembrete,
+    /// Dois toques, "ding-dong": aviso de tarefa.
+    Chamada,
+    /// Cascata descendente: aviso de tarefa.
+    Brisa,
+    /// Notas repetidas e insistentes: algo no horário.
+    Urgente,
+    /// Quinta ascendente suave: tarefa concluída.
+    Concluido,
 }
 
 /// (frequência Hz, início s, duração s)
 type Note = (f32, f32, f32);
 
 impl Sound {
-    pub const ALL: [Sound; 5] = [Sound::Hey, Sound::Listen, Sound::HeyListen, Sound::Hello, Sound::WatchOut];
+    pub const ALL: [Sound; 6] =
+        [Sound::BemVindo, Sound::Lembrete, Sound::Chamada, Sound::Brisa, Sound::Urgente, Sound::Concluido];
 
     /// Nome do som (também o nome do arquivo `.wav` exportado).
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn name(self) -> &'static str {
         match self {
-            Sound::Hey => "Hey",
-            Sound::Listen => "Listen",
-            Sound::HeyListen => "Hey, listen",
-            Sound::Hello => "Hello",
-            Sound::WatchOut => "Watch out",
+            Sound::BemVindo => "Bem-vindo",
+            Sound::Lembrete => "Lembrete",
+            Sound::Chamada => "Chamada",
+            Sound::Brisa => "Brisa",
+            Sound::Urgente => "Urgente",
+            Sound::Concluido => "Concluido",
         }
     }
 
     fn notes(self) -> &'static [Note] {
         match self {
-            // sobe rápido: Mi6 -> Lá6
-            Sound::Hey => &[(1318.5, 0.00, 0.11), (1760.0, 0.09, 0.16)],
-            // "Lis-ten": Sol6, Si6, Mi7 (a última mais longa)
-            Sound::Listen => &[(1568.0, 0.00, 0.11), (1975.5, 0.10, 0.12), (2637.0, 0.20, 0.45)],
-            Sound::HeyListen => &[
-                (1318.5, 0.00, 0.11),
-                (1760.0, 0.09, 0.16),
-                (1568.0, 0.42, 0.11),
-                (1975.5, 0.52, 0.12),
-                (2637.0, 0.62, 0.45),
+            // Dó6 Mi6 Sol6 Dó7 (pentatônica, sobe e abre)
+            Sound::BemVindo => &[(1046.5, 0.00, 0.12), (1318.5, 0.11, 0.12), (1568.0, 0.22, 0.12), (2093.0, 0.33, 0.45)],
+            // Lá5 Ré6 Lá6
+            Sound::Lembrete => &[(880.0, 0.00, 0.14), (1174.7, 0.14, 0.14), (1760.0, 0.28, 0.45)],
+            // Mi6 depois Si5: dois toques espaçados
+            Sound::Chamada => &[(1318.5, 0.00, 0.30), (987.8, 0.38, 0.55)],
+            // Mi7 Dó7 Lá6 Sol6 Mi6: desce em cascata
+            Sound::Brisa => &[
+                (2637.0, 0.00, 0.08),
+                (2093.0, 0.09, 0.08),
+                (1760.0, 0.18, 0.08),
+                (1568.0, 0.27, 0.08),
+                (1318.5, 0.36, 0.40),
             ],
-            // "He-llo": curto, sobe e abre num Mi7 sustentado
-            Sound::Hello => &[(1568.0, 0.00, 0.10), (2093.0, 0.11, 0.12), (2637.0, 0.23, 0.40)],
-            // "Watch out!": insistente, notas repetidas e rápidas, mais agudas
-            Sound::WatchOut => &[
-                (1975.5, 0.00, 0.07),
-                (1975.5, 0.09, 0.07),
-                (1975.5, 0.18, 0.07),
-                (2637.0, 0.27, 0.30),
-            ],
+            // Sol6 três vezes e Dó7 por cima
+            Sound::Urgente => &[(1568.0, 0.00, 0.08), (1568.0, 0.14, 0.08), (1568.0, 0.28, 0.08), (2093.0, 0.42, 0.40)],
+            // Dó6 e Sol6
+            Sound::Concluido => &[(1046.5, 0.00, 0.14), (1568.0, 0.16, 0.45)],
         }
     }
 }
-
 fn build(sound: Sound) -> Vec<u8> {
     let notes = sound.notes();
     let total = notes.iter().map(|n| n.1 + n.2).fold(0.0, f32::max) + 0.35;
@@ -100,7 +105,7 @@ fn build(sound: Sound) -> Vec<u8> {
 
 /// WAV do som, gerado uma vez. O buffer é estático porque o Windows lê dele de forma assíncrona.
 pub fn wav(sound: Sound) -> &'static [u8] {
-    static WAVS: [OnceLock<Vec<u8>>; 5] = [const { OnceLock::new() }; 5];
+    static WAVS: [OnceLock<Vec<u8>>; 6] = [const { OnceLock::new() }; 6];
     let i = Sound::ALL.iter().position(|s| *s == sound).unwrap_or(0);
     WAVS[i].get_or_init(|| build(sound))
 }
@@ -113,11 +118,11 @@ pub fn play(sound: Sound) {
     }
 }
 
-/// Som de aviso: sorteia entre Hello, Hey e Hey listen, sem repetir o anterior.
+/// Som de aviso: sorteia entre Lembrete, Chamada e Brisa, sem repetir o anterior.
 pub fn notification() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static LAST: AtomicUsize = AtomicUsize::new(usize::MAX);
-    const POOL: [Sound; 3] = [Sound::Hello, Sound::Hey, Sound::HeyListen];
+    const POOL: [Sound; 3] = [Sound::Lembrete, Sound::Chamada, Sound::Brisa];
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos() as usize);
