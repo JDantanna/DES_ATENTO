@@ -366,11 +366,13 @@ pub struct Settings {
     pub minimize_to_tray: Option<bool>,
     /// Escala da interface (1.0 = 100%).
     pub scale: f32,
+    /// O aviso "continua na bandeja" já foi mostrado (só aparece na primeira vez).
+    pub tray_notice_shown: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { minimize_to_tray: None, scale: 1.0 }
+        Self { minimize_to_tray: None, scale: 1.0, tray_notice_shown: false }
     }
 }
 

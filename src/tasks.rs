@@ -8,12 +8,32 @@ use crate::chrome::{self, Glyph};
 use crate::model::{Repeat, Store, Subtask, Task, tag_rgb};
 use crate::theme::ACCENT;
 
+const ROW_H: f32 = 42.0;
+/// Cinza dos detalhes de cada tarefa.
+const DIM: Color32 = Color32::from_gray(140);
+
 /// Etiqueta colorida de uma tag; `on` a destaca (filtro ativo).
 fn tag_chip(ui: &mut egui::Ui, tag: &str, rgb: [u8; 3], on: bool, suffix: &str) -> egui::Response {
     let c = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-    let text = RichText::new(format!("#{tag}{suffix}")).color(Color32::WHITE);
+    let text = RichText::new(format!("#{tag}{suffix}")).size(11.0).color(Color32::WHITE);
     let fill = c.gamma_multiply(if on { 0.75 } else { 0.28 });
-    ui.add(egui::Button::new(text).fill(fill).stroke(egui::Stroke::new(1.0, c.gamma_multiply(0.85))).corner_radius(10))
+    // Compacta: pouco respiro interno e altura mínima baixa, mas ainda legível.
+    ui.scope(|ui| {
+        ui.spacing_mut().button_padding = egui::vec2(5.0, 0.0);
+        ui.add(
+            egui::Button::new(text)
+                .fill(fill)
+                .stroke(egui::Stroke::new(1.0, c.gamma_multiply(0.85)))
+                .corner_radius(8)
+                .min_size(egui::vec2(0.0, 16.0)),
+        )
+    })
+    .inner
+}
+
+/// Linhas de tags lado a lado, com pouco espaço entre elas.
+fn tight(ui: &mut egui::Ui) {
+    ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -171,6 +191,7 @@ impl TasksView {
         let tags = store.all_tags();
         if !tags.is_empty() {
             ui.horizontal_wrapped(|ui| {
+                tight(ui);
                 for t in &tags {
                     let on = self.tag_filter.as_ref() == Some(t);
                     if tag_chip(ui, t, tag_rgb(&store.tag_colors, t), on, "").clicked() {
@@ -201,6 +222,7 @@ impl TasksView {
 
         let mut dirty = false;
         let mut delete = None;
+        let colors = &store.tag_colors;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             if idx.is_empty() {
                 ui.weak("Nada por aqui.");
@@ -208,7 +230,7 @@ impl TasksView {
             for i in idx {
                 let t = &mut store.tasks[i];
                 // A linha inteira é clicável; os controles dentro dela (caixa, texto) têm prioridade.
-                let row = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 28.0));
+                let row = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), ROW_H));
                 let resp = ui.interact(row, ui.scope_id().with(("linha", t.id)), egui::Sense::click());
                 let selected = self.selected == Some(t.id);
                 if selected || resp.hovered() {
@@ -231,7 +253,7 @@ impl TasksView {
                 });
                 let layout = egui::Layout::left_to_right(egui::Align::Center);
                 ui.scope_builder(egui::UiBuilder::new().max_rect(row).layout(layout), |ui| {
-                    ui.set_min_height(28.0);
+                    ui.set_min_height(ROW_H);
                     if ui.checkbox(&mut t.done, "").changed() {
                         t.roll_over();
                         dirty = true;
@@ -239,25 +261,42 @@ impl TasksView {
                     let [r, g, b] = t.color;
                     let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
                     ui.painter().circle_filled(dot.center(), 4.5, Color32::from_rgb(r, g, b));
-                    let mut title = RichText::new(&t.title);
-                    if t.done {
-                        title = title.strikethrough().weak();
-                    }
-                    ui.add(egui::Label::new(title).selectable(false));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let mut info = String::new();
-                        if let Some(h) = t.time {
-                            info.push_str(&h.format("%H:%M ").to_string());
+                    // Título em cima; embaixo, uma linha de detalhes: data · hora · checklist e as tags.
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        let mut title = RichText::new(&t.title);
+                        if t.done {
+                            title = title.strikethrough().weak();
                         }
-                        if let (Some(d), true) = (t.date, self.filter != Filter::Hoje) {
-                            info.push_str(&d.format("%d/%m").to_string());
+                        ui.add(egui::Label::new(title).selectable(false).truncate());
+
+                        let overdue = !t.done && t.date.is_some_and(|d| d < today);
+                        let mut parts: Vec<(String, Color32)> = Vec::new();
+                        if let (Some(d), true) = (t.date, self.filter != Filter::Hoje || overdue) {
+                            let color = if overdue { Color32::from_rgb(230, 110, 110) } else { DIM };
+                            parts.push((d.format("%d/%m").to_string(), color));
+                        }
+                        if let Some(h) = t.time {
+                            parts.push((h.format("%H:%M").to_string(), DIM));
                         }
                         let (ok, total) = t.subtasks_done();
                         if total > 0 {
-                            info.push_str(&format!(" {ok}/{total}"));
+                            parts.push((format!("{ok}/{total} itens"), DIM));
                         }
-                        if !info.is_empty() {
-                            ui.weak(info.trim());
+                        if !parts.is_empty() || !t.tags.is_empty() {
+                            ui.horizontal(|ui| {
+                                tight(ui);
+                                for (i, (text, color)) in parts.iter().enumerate() {
+                                    if i > 0 {
+                                        ui.label(RichText::new("·").size(11.5).color(DIM));
+                                    }
+                                    ui.label(RichText::new(text).size(11.5).color(*color));
+                                }
+                                for tag in &t.tags {
+                                    let [r, g, b] = tag_rgb(colors, tag);
+                                    ui.label(RichText::new(format!("#{tag}")).size(11.0).color(Color32::from_rgb(r, g, b)));
+                                }
+                            });
                         }
                     });
                 });
@@ -431,6 +470,7 @@ impl TasksView {
             ui.add_space(8.0);
             ui.label("Tags");
             ui.horizontal_wrapped(|ui| {
+                tight(ui);
                 let mut rm = None;
                 for (i, tag) in t.tags.iter().enumerate() {
                     if tag_chip(ui, tag, tag_rgb(colors, tag), true, "  ×").clicked() {
@@ -456,6 +496,7 @@ impl TasksView {
             let unused: Vec<&String> = all_tags.iter().filter(|g| !t.tags.contains(g)).collect();
             if !unused.is_empty() {
                 ui.horizontal_wrapped(|ui| {
+                    tight(ui);
                     ui.weak("Existentes:");
                     for tag in unused {
                         if tag_chip(ui, tag, tag_rgb(colors, tag), false, "").clicked() {

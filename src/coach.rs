@@ -3,10 +3,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Datelike, Local};
-use eframe::egui::{self, Align2, Color32, FontId, Sense, vec2};
+use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, vec2};
 
-use crate::theme::{ACCENT, BG};
+use crate::theme::{self, ACCENT, BG};
 use crate::tracker::{Icon, Tracker};
+use crate::chrome;
 
 #[derive(PartialEq, Clone, Copy)]
 enum Range {
@@ -26,7 +27,13 @@ impl Range {
 }
 
 const WIDGET_ID: &str = "coach_widget";
+const WIDGET_TITLE: &str = "Navi · Coach";
+/// Largura de referência do widget (as fontes escalam em relação a ela).
 const WIDGET_W: f32 = 340.0;
+const COMPACT_H: f32 = 190.0;
+const LIST_H: f32 = 400.0;
+const MIN_W: f32 = 230.0;
+const MIN_H: f32 = 150.0;
 
 pub struct CoachView {
     range: Range,
@@ -34,6 +41,14 @@ pub struct CoachView {
     widget_list: bool,
     /// Altura atual da janela do widget (o redimensionamento só é pedido quando ela muda).
     widget_h: f32,
+    /// Largura atual da janela do widget (o usuário pode redimensionar).
+    widget_w: f32,
+    /// O widget está se fechando (esmaecendo).
+    closing: bool,
+    /// O widget acabou de abrir e deve surgir esmaecendo desde o zero.
+    widget_fresh: bool,
+    /// A moldura quadrada do Windows já foi removida da janela do widget.
+    frame_fixed: bool,
     /// Zoom da interface quando a janela do widget foi dimensionada pela última vez.
     widget_zoom: f32,
     /// O widget acabou de ser aberto (o app principal vai para a bandeja).
@@ -78,27 +93,9 @@ pub fn fmt(secs: u64) -> String {
     }
 }
 
-/// Tempo por extenso: `1 hora, 23 minutos e 5 segundos`.
-pub fn fmt_long(secs: u64, with_secs: bool) -> String {
-    let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
-    let unit = |n: u64, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
-    let mut parts = Vec::new();
-    if h > 0 {
-        parts.push(unit(h, "hora", "horas"));
-    }
-    if m > 0 {
-        parts.push(unit(m, "minuto", "minutos"));
-    }
-    if (s > 0 && with_secs) || parts.is_empty() {
-        parts.push(unit(s, "segundo", "segundos"));
-    }
-    match parts.len() {
-        1 => parts.remove(0),
-        _ => {
-            let last = parts.pop().unwrap();
-            format!("{} e {last}", parts.join(", "))
-        }
-    }
+/// Relógio `HH:MM:SS`.
+pub fn clock(secs: u64) -> String {
+    format!("{:02}:{:02}:{:02}", secs / 3600, secs % 3600 / 60, secs % 60)
 }
 
 impl CoachView {
@@ -108,6 +105,10 @@ impl CoachView {
             widget: false,
             widget_list: false,
             widget_h: 0.0,
+            widget_w: WIDGET_W,
+            closing: false,
+            widget_fresh: false,
+            frame_fixed: false,
             widget_zoom: 1.0,
             just_opened: false,
             open_app: false,
@@ -135,9 +136,14 @@ impl CoachView {
                 ui.selectable_value(&mut self.range, Range::Semana, "7 dias");
                 ui.selectable_value(&mut self.range, Range::Mes, "30 dias");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if fairy_button(ui, self.widget) {
-                        self.widget = !self.widget;
-                        self.just_opened = self.widget;
+                    if fairy_button(ui, self.widget && !self.closing) {
+                        if self.widget && !self.closing {
+                            self.closing = true;
+                        } else if !self.widget {
+                            self.widget = true;
+                            self.widget_fresh = true;
+                            self.just_opened = true;
+                        }
                     }
                 });
             });
@@ -188,23 +194,37 @@ impl CoachView {
     pub fn floating(&mut self, ui: &mut egui::Ui, tracker: &Tracker) {
         if !self.widget {
             self.widget_h = 0.0;
+            self.frame_fixed = false;
             return;
         }
         let ctx = ui.ctx().clone();
         ctx.request_repaint_after(Duration::from_secs(1));
+        // Abre e fecha com o mesmo esmaecer suave do resto do app.
+        let fade_id = ui.scope_id().with("widget_fade");
+        if std::mem::take(&mut self.widget_fresh) {
+            ctx.animate_value_with_time(fade_id, 0.0, 0.0);
+        }
+        let fade = ctx.animate_value_with_time(fade_id, if self.closing { 0.0 } else { 1.0 }, theme::FADE_SECS);
+        if self.closing && fade <= 0.01 {
+            self.widget = false;
+            self.closing = false;
+            return;
+        }
+
         let data = tracker.widget();
         let name = if data.now.idle { "Ocioso".to_owned() } else { data.now.current.clone().unwrap_or_else(|| "–".to_owned()) };
         let cur_tex = icon_tex(&mut self.icons, &ctx, data.now.icon.as_ref());
         let rows_tex: Vec<Option<egui::TextureId>> =
             data.session.iter().map(|r| icon_tex(&mut self.icons, &ctx, r.icon.as_ref())).collect();
-        let height = if self.widget_list { 176.0 + data.session.len().min(7) as f32 * 26.0 + 8.0 } else { 150.0 };
+        let height = if self.widget_list { LIST_H } else { COMPACT_H };
 
         let id = egui::ViewportId::from_hash_of(WIDGET_ID);
-        // Só pede novo tamanho quando ele ou a escala muda: um comando a cada quadro mantém a janela repintando sem parar.
+        // Só pede novo tamanho quando a lista abre/fecha ou a escala muda: um comando a cada quadro
+        // mantém a janela repintando sem parar, e o tamanho que o usuário escolheu arrastando não pode ser desfeito.
         let zoom = ctx.zoom_factor();
         let first = self.widget_h == 0.0;
         if (!first && (self.widget_h - height).abs() > f32::EPSILON) || (zoom - self.widget_zoom).abs() > 1e-3 {
-            ctx.send_viewport_cmd_to(id, egui::ViewportCommand::InnerSize(vec2(WIDGET_W, height)));
+            ctx.send_viewport_cmd_to(id, egui::ViewportCommand::InnerSize(vec2(self.widget_w, height)));
         }
         self.widget_h = height;
         // No primeiro quadro a janela ainda não existe; o comando só vale a partir do próximo.
@@ -213,65 +233,84 @@ impl CoachView {
         }
 
         let builder = egui::ViewportBuilder::default()
-            .with_title("Navi · Coach")
-            .with_inner_size([WIDGET_W, height])
+            .with_title(WIDGET_TITLE)
+            .with_inner_size([self.widget_w, height])
+            .with_min_inner_size([MIN_W, MIN_H])
             .with_decorations(false)
             .with_transparent(true)
             .with_always_on_top()
-            .with_resizable(false);
+            .with_resizable(true);
         let mut close = false;
         let mut toggle_list = false;
         let mut open_app = false;
+        let mut size = None;
         let open = self.widget_list;
         // Sem nada sendo rastreado (ocioso ou sem programa), o widget fica vermelho.
         let tracking = !data.now.idle && data.now.current.is_some();
-        let (fill, stroke, time_color) = if tracking {
-            (BG, Color32::from_white_alpha(22), ACCENT)
+        let (fill, time_color) = if tracking {
+            (BG, ACCENT)
         } else {
-            (Color32::from_rgb(58, 20, 24), Color32::from_rgb(214, 70, 70), Color32::from_rgb(255, 120, 120))
+            (Color32::from_rgb(58, 20, 24), Color32::from_rgb(255, 120, 120))
         };
         ctx.show_viewport_immediate(id, builder, |ui, _class| {
+            ui.set_opacity(fade);
             let full = ui.max_rect();
-            ui.painter().rect_filled(full, 14.0, fill);
-            ui.painter().rect_stroke(full, 14.0, egui::Stroke::new(if tracking { 1.0 } else { 1.5 }, stroke), egui::StrokeKind::Inside);
+            size = Some(full.size());
 
             let drag = ui.interact(full, ui.scope_id().with("widget_drag"), Sense::click_and_drag());
+            // Com o mouse em cima, o widget clareia um pouco, como se uma luz o iluminasse.
+            let glow = ui.ctx().animate_bool_with_time(ui.scope_id().with("widget_glow"), drag.contains_pointer(), 0.2);
+            let lit = fill.lerp_to_gamma(Color32::from_rgb(170, 190, 255), 0.13 * glow);
+            ui.painter().rect_filled(full, chrome::RADIUS, lit);
+            let edge = if tracking {
+                Stroke::new(1.0, Color32::from_white_alpha(22 + (60.0 * glow) as u8))
+            } else {
+                Stroke::new(1.5, Color32::from_rgb(214, 70, 70).lerp_to_gamma(Color32::from_rgb(255, 130, 130), glow))
+            };
+            ui.painter().rect_stroke(full, chrome::RADIUS, edge, egui::StrokeKind::Inside);
+            chrome::resize_handles(ui, full);
+
             if drag.drag_started() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
             if drag.double_clicked() {
                 open_app = true;
             }
+            // A fonte do relógio acompanha a largura da janela.
+            let k = (full.width() / WIDGET_W).clamp(0.7, 2.4);
             egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(14)).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if cur_tex.is_some() {
                         app_icon(ui, cur_tex);
                     }
-                    ui.label(egui::RichText::new(&name).strong());
+                    ui.add(egui::Label::new(egui::RichText::new(&name).strong()).truncate());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if crate::chrome::close_button(ui).clicked() {
+                        if chrome::close_button(ui).clicked() {
                             close = true;
                         }
                     });
                 });
-                ui.label(egui::RichText::new(fmt_long(data.app_secs, true)).size(19.0).color(time_color));
-                ui.weak(format!("Hoje, no total: {}", fmt_long(data.total, false)));
-                ui.add_space(2.0);
-                let label = format!("{} Programas desta sessão ({})", if open { "–" } else { "+" }, data.session.len());
-                if ui.add(egui::Button::new(label).frame(false)).clicked() {
-                    toggle_list = true;
-                }
+                ui.vertical_centered(|ui| {
+                    ui.add_space(2.0 * k);
+                    ui.label(egui::RichText::new(clock(data.app_secs)).monospace().strong().size(34.0 * k).color(time_color));
+                    ui.weak(format!("Hoje, no total: {}", clock(data.total)));
+                    ui.add_space(2.0);
+                    let label = format!("{} Programas desta sessão ({})", if open { "–" } else { "+" }, data.session.len());
+                    if ui.add(egui::Button::new(label).frame(false)).clicked() {
+                        toggle_list = true;
+                    }
+                });
                 if open {
-                    egui::ScrollArea::vertical().max_height(7.0 * 26.0).show(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height(ui.available_height()).show(ui, |ui| {
                         if data.session.is_empty() {
                             ui.weak("Nenhum programa registrado ainda.");
                         }
                         for (row, tex) in data.session.iter().zip(&rows_tex) {
                             ui.horizontal(|ui| {
                                 app_icon(ui, *tex);
-                                ui.label(egui::RichText::new(&row.name).strong());
+                                ui.add(egui::Label::new(egui::RichText::new(&row.name).strong()).truncate());
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.weak(fmt_long(row.secs, false));
+                                    ui.weak(clock(row.secs));
                                 });
                             });
                         }
@@ -279,12 +318,22 @@ impl CoachView {
                 }
             });
         });
+        if let Some(s) = size {
+            self.widget_w = s.x.max(MIN_W);
+        }
+        // A janela só existe a partir do primeiro quadro; então tira a moldura quadrada do Windows.
+        if !first && !self.frame_fixed {
+            self.frame_fixed = chrome::flatten_window(WIDGET_TITLE);
+        }
         if toggle_list {
             self.widget_list = !self.widget_list;
         }
-        self.open_app |= open_app;
+        if open_app {
+            self.open_app = true;
+            self.closing = true;
+        }
         if close {
-            self.widget = false;
+            self.closing = true;
         }
     }
 }
@@ -331,7 +380,8 @@ fn fairy_button(ui: &mut egui::Ui, active: bool) -> bool {
     let (rect, resp) = ui.allocate_exact_size(vec2(64.0, 44.0), Sense::click());
     let amp = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.18);
     let time = ui.input(|i| i.time) as f32;
-    let flap = (time * 22.0).sin() * amp;
+    // Cerca de 2 batidas por segundo: rápido o bastante para parecer voo, devagar o bastante para ver as asas.
+    let flap = (time * 13.0).sin() * amp;
     if amp > 0.0 {
         ui.ctx().request_repaint();
     }

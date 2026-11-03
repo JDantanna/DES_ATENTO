@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod appcache;
 mod appname;
 mod chrome;
 mod coach;
@@ -48,6 +49,10 @@ struct App {
     ask_minimize: bool,
     settings: Settings,
     scale_dirty: bool,
+    /// Etapa da volta da bandeja com esmaecer (0 = nenhuma).
+    restore_stage: u8,
+    /// A moldura quadrada do Windows já foi removida da janela principal.
+    frame_fixed: bool,
 }
 
 impl App {
@@ -77,6 +82,8 @@ impl App {
             ask_minimize: false,
             settings,
             scale_dirty: false,
+            restore_stage: 0,
+            frame_fixed: false,
         }
     }
 
@@ -120,16 +127,46 @@ impl App {
         // Sem bandeja disponível, ao menos minimiza.
         if self.tray.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        } else if !self.settings.tray_notice_shown {
+            // Só na primeira vez: avisa que o Navi continua rodando na bandeja.
+            self.settings.tray_notice_shown = true;
+            self.settings.save();
+            notify::toast("O Navi continua aberto", "Ele está na bandeja do sistema. Clique no ícone para abrir.");
         }
     }
 
     /// Traz a janela principal de volta (da bandeja ou da barra de tarefas) e a põe em foco.
+    /// Da bandeja ela reaparece esmaecendo: primeiro um quadro transparente, só então a janela é mostrada.
     fn restore(&mut self, ctx: &egui::Context) {
-        if self.tray.take().is_some() {
-            tray::leave();
+        if self.tray.is_some() {
+            self.restore_stage = 1;
+            ctx.request_repaint();
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
-        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    /// Opacidade da janela principal neste quadro (0 a 1) e as etapas de volta da bandeja.
+    fn fade(&mut self, ctx: &egui::Context, id: egui::Id) -> f32 {
+        let hold = self.restore_stage == 1;
+        match self.restore_stage {
+            1 => {
+                ctx.animate_value_with_time(id, 0.0, 0.0);
+                self.restore_stage = 2;
+                ctx.request_repaint();
+            }
+            2 => {
+                if self.tray.take().is_some() {
+                    tray::leave();
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                self.restore_stage = 0;
+            }
+            _ => {}
+        }
+        if hold { 0.0 } else { ctx.animate_value_with_time(id, 1.0, theme::FADE_SECS) }
     }
 
     /// Mantém a escala dentro dos limites e a grava quando muda (menu, Ctrl +/-).
@@ -287,7 +324,13 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.sync_scale(ui.ctx());
+        let ctx = ui.ctx().clone();
+        self.sync_scale(&ctx);
+        if !self.frame_fixed {
+            self.frame_fixed = chrome::flatten_window("Navi");
+        }
+        let fade = self.fade(&ctx, ui.scope_id().with("app_fade"));
+        ui.set_opacity(fade);
         let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
         let radius = if maximized { 0.0 } else { chrome::RADIUS };
         let full = ui.max_rect();

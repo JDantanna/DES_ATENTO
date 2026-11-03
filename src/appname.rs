@@ -12,44 +12,44 @@ const BROWSERS: [(&str, &str, &str); 7] = [
     ("arc", "Arc", "arc"),
 ];
 
-/// (trecho do título em minúsculas, nome do site). A ordem importa: o primeiro que casar vence.
-const SITES: [(&str, &str); 36] = [
-    ("whatsapp", "WhatsApp Web"),
-    ("youtube", "YouTube"),
-    ("gmail", "Gmail"),
-    ("google agenda", "Google Agenda"),
-    ("google calendar", "Google Agenda"),
-    ("google drive", "Google Drive"),
-    ("meu drive", "Google Drive"),
-    ("google docs", "Google Docs"),
-    ("google planilhas", "Google Planilhas"),
-    ("google sheets", "Google Planilhas"),
-    ("google apresentações", "Google Apresentações"),
-    ("google meet", "Google Meet"),
-    ("outlook", "Outlook"),
-    ("microsoft teams", "Microsoft Teams"),
-    ("notion", "Notion"),
-    ("github", "GitHub"),
-    ("stack overflow", "Stack Overflow"),
-    ("chatgpt", "ChatGPT"),
-    ("claude", "Claude"),
-    ("netflix", "Netflix"),
-    ("spotify", "Spotify"),
-    ("instagram", "Instagram"),
-    ("facebook", "Facebook"),
-    ("linkedin", "LinkedIn"),
-    ("telegram", "Telegram Web"),
-    ("discord", "Discord"),
-    ("figma", "Figma"),
-    ("canva", "Canva"),
-    ("trello", "Trello"),
-    ("slack", "Slack"),
-    ("twitch", "Twitch"),
-    ("reddit", "Reddit"),
-    ("mercado livre", "Mercado Livre"),
-    ("amazon", "Amazon"),
-    ("wikipédia", "Wikipédia"),
-    ("/ x", "X"),
+/// (trecho do título em minúsculas, nome do site, domínio para buscar o ícone). A ordem importa: o primeiro que casar vence.
+const SITES: [(&str, &str, &str); 36] = [
+    ("whatsapp", "WhatsApp Web", "whatsapp.com"),
+    ("youtube", "YouTube", "youtube.com"),
+    ("gmail", "Gmail", "mail.google.com"),
+    ("google agenda", "Google Agenda", "calendar.google.com"),
+    ("google calendar", "Google Agenda", "calendar.google.com"),
+    ("google drive", "Google Drive", "drive.google.com"),
+    ("meu drive", "Google Drive", "drive.google.com"),
+    ("google docs", "Google Docs", "docs.google.com"),
+    ("google planilhas", "Google Planilhas", "sheets.google.com"),
+    ("google sheets", "Google Planilhas", "sheets.google.com"),
+    ("google apresentações", "Google Apresentações", "slides.google.com"),
+    ("google meet", "Google Meet", "meet.google.com"),
+    ("outlook", "Outlook", "outlook.live.com"),
+    ("microsoft teams", "Microsoft Teams", "teams.microsoft.com"),
+    ("notion", "Notion", "notion.so"),
+    ("github", "GitHub", "github.com"),
+    ("stack overflow", "Stack Overflow", "stackoverflow.com"),
+    ("chatgpt", "ChatGPT", "chatgpt.com"),
+    ("claude", "Claude", "claude.ai"),
+    ("netflix", "Netflix", "netflix.com"),
+    ("spotify", "Spotify", "spotify.com"),
+    ("instagram", "Instagram", "instagram.com"),
+    ("facebook", "Facebook", "facebook.com"),
+    ("linkedin", "LinkedIn", "linkedin.com"),
+    ("telegram", "Telegram Web", "web.telegram.org"),
+    ("discord", "Discord", "discord.com"),
+    ("figma", "Figma", "figma.com"),
+    ("canva", "Canva", "canva.com"),
+    ("trello", "Trello", "trello.com"),
+    ("slack", "Slack", "slack.com"),
+    ("twitch", "Twitch", "twitch.tv"),
+    ("reddit", "Reddit", "reddit.com"),
+    ("mercado livre", "Mercado Livre", "mercadolivre.com.br"),
+    ("amazon", "Amazon", "amazon.com.br"),
+    ("wikipédia", "Wikipédia", "wikipedia.org"),
+    ("/ x", "X", "x.com"),
 ];
 
 fn clean(s: &str) -> String {
@@ -142,7 +142,23 @@ pub fn prettify(exe: &str) -> String {
     if out.is_empty() { exe.to_owned() } else { out }
 }
 
-fn browser_name(pretty: &str, key: &str, title: &str) -> String {
+/// Domínio do site conhecido que está aberto no navegador (para buscar o ícone dele).
+pub fn site_domain(exe: &str, title: &str) -> Option<&'static str> {
+    let lower = exe.to_lowercase();
+    let (_, _, key) = BROWSERS.iter().find(|b| b.0 == lower)?;
+    let (_, _, domain) = site_match(key, title)?;
+    Some(domain)
+}
+
+/// O site conhecido cujo nome aparece no título da página.
+fn site_match(key: &str, title: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    let (page_title, _) = page_title(key, title);
+    let low = page_title.to_lowercase();
+    SITES.iter().find(|(k, _, _)| low.contains(k)).copied()
+}
+
+/// Título da página sem o nome do navegador e o contador; `true` se a janela não é do navegador (app instalado).
+fn page_title(key: &str, title: &str) -> (String, bool) {
     let title = clean(title);
     let pieces: Vec<&str> = title.split(" - ").flat_map(|p| p.split(" – ")).flat_map(|p| p.split(" — ")).collect();
     // Tira do fim o nome do navegador e o perfil ("... - Pessoal - Microsoft Edge").
@@ -151,19 +167,23 @@ fn browser_name(pretty: &str, key: &str, title: &str) -> String {
         Some(i) => (&pieces[..i], false),
         None => (&pieces[..], true),
     };
-    let page_title = strip_counter(&page.join(" - ")).to_owned();
-    let low = page_title.to_lowercase();
-    if let Some((_, site)) = SITES.iter().find(|(k, _)| low.contains(k)) {
-        return (*site).to_owned();
+    (strip_counter(&page.join(" - ")).to_owned(), is_app_window)
+}
+
+fn browser_name(pretty: &str, key: &str, title: &str) -> String {
+    if let Some((_, site, _)) = site_match(key, title) {
+        return site.to_owned();
     }
+    let (page_title, is_app_window) = page_title(key, title);
     // Janela de aplicativo instalado (PWA): o título já é o nome do app.
     if is_app_window {
         let t = page_title.trim();
         return if t.is_empty() { pretty.to_owned() } else { t.to_owned() };
     }
     // Páginas costumam terminar com o nome do site: "Notícia - Folha".
-    if page.len() > 1 {
-        if let Some(last) = page.last().map(|l| l.trim()).filter(|l| !l.is_empty() && l.chars().count() <= 22) {
+    if let Some((_, last)) = page_title.rsplit_once(" - ") {
+        let last = last.trim();
+        if !last.is_empty() && last.chars().count() <= 22 {
             return last.to_owned();
         }
     }

@@ -5,12 +5,14 @@ use eframe::egui::{Color32, Painter, Pos2, Shape, Stroke, vec2};
 /// `flap` vai de -1 a 1 (abertura das asas); `glow` de 0 a 1 (brilho extra).
 pub fn draw(p: &Painter, c: Pos2, size: f32, flap: f32, glow: f32) {
     // (ângulo em rad, comprimento, largura), relativos ao tamanho
-    let wings = [(-2.36f32, 0.50f32, 0.20f32), (-0.78, 0.50, 0.20), (2.2, 0.34, 0.15), (0.94, 0.34, 0.15)];
-    let open = 0.7 + 0.3 * flap;
-    for (ang, len, wid) in wings {
+    // (ângulo em repouso, comprimento, largura, sentido do giro). As asas giram em torno do corpo,
+    // as de cima e as de baixo em oposição, como um bater de asas de verdade.
+    let wings = [(-2.36f32, 0.50f32, 0.20f32, 1.0f32), (-0.78, 0.50, 0.20, -1.0), (2.2, 0.34, 0.15, -0.7), (0.94, 0.34, 0.15, 0.7)];
+    for (rest, len, wid, turn) in wings {
+        let ang = rest + turn * flap * 0.55;
         let dir = vec2(ang.cos(), ang.sin());
         let perp = vec2(-dir.y, dir.x);
-        let l = size * len * open;
+        let l = size * len * (0.9 + 0.1 * (1.0 - flap.abs()));
         let w = size * wid;
         let pts: Vec<Pos2> = (0..28)
             .map(|k| {

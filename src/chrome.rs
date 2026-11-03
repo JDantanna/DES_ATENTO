@@ -89,6 +89,30 @@ pub fn close_button(ui: &mut egui::Ui) -> Response {
     window_button(ui, Glyph::Close)
 }
 
+/// Tira da janela a moldura quadrada que o Windows desenha atrás de janelas sem decoração (sombra e
+/// borda de 1 px), que aparecia por trás dos cantos arredondados. Retorna `false` se a janela ainda não existe.
+pub fn flatten_window(title: &str) -> bool {
+    use std::ffi::c_void;
+    use windows_sys::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute};
+    use windows_sys::Win32::UI::Controls::MARGINS;
+    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
+
+    let wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
+        if hwnd.is_null() {
+            return false;
+        }
+        let none = MARGINS { cxLeftWidth: 0, cxRightWidth: 0, cyTopHeight: 0, cyBottomHeight: 0 };
+        DwmExtendFrameIntoClientArea(hwnd, &none);
+        // DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED; DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_DONOTROUND.
+        let one: i32 = 1;
+        DwmSetWindowAttribute(hwnd, 2, &one as *const i32 as *const c_void, 4);
+        DwmSetWindowAttribute(hwnd, 33, &one as *const i32 as *const c_void, 4);
+    }
+    true
+}
+
 /// Faixas finas nas bordas e cantos que iniciam o redimensionamento.
 pub fn resize_handles(ui: &mut egui::Ui, full: Rect) {
     let (e, c) = (5.0, 12.0);

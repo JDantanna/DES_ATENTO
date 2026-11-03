@@ -6,6 +6,7 @@ use std::time::Duration;
 use chrono::{Local, NaiveDate};
 use serde::{Deserialize, Serialize};
 
+use crate::appcache::{self, Cache};
 use crate::appname;
 
 const IDLE_SECS: u32 = 300;
@@ -120,36 +121,93 @@ impl Tracker {
         let mut usage: Usage =
             std::fs::read_to_string(path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         usage.tidy();
-        let shared = Arc::new(Mutex::new(Shared { usage, ..Default::default() }));
+        let mut cache = Cache::load();
+        let shared = Arc::new(Mutex::new(Shared { usage, icon_of: cache.icon_of.clone(), ..Default::default() }));
         let worker = Arc::clone(&shared);
         std::thread::spawn(move || {
             let me = std::env::current_exe()
                 .ok()
                 .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
+            // Ícones guardados em execuções anteriores: lidos do disco uma vez, sem consultar o sistema nem a internet.
+            let saved: Vec<_> = cache
+                .icon_of
+                .values()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .filter_map(|k| appcache::load_icon(k).map(|i| (k.clone(), Arc::new(i))))
+                .collect();
+            worker.lock().unwrap().icons.extend(saved);
+
             let mut ticks = 0u32;
-            // Caches só desta thread: consultar ícone e nome do produto é caro e feito uma vez por executável.
+            // Cada consulta (nome do produto, ícone do exe, ícone do site) é feita uma única vez por programa.
             let mut icon_tried: HashSet<String> = HashSet::new();
-            let mut products: HashMap<String, Option<String>> = HashMap::new();
+            let mut names_tried: HashSet<String> = HashSet::new();
+            let mut sites_tried: HashSet<&'static str> = HashSet::new();
+            let mut cache_dirty = false;
             loop {
                 std::thread::sleep(Duration::from_secs(1));
                 let idle = sys::idle_secs() >= IDLE_SECS;
                 let fg = if idle { None } else { sys::foreground() };
+                let site = fg.as_ref().and_then(|f| appname::site_domain(&f.exe, &f.title));
                 let name = fg.as_ref().map(|f| {
-                    let product = appname::needs_product(&f.exe)
-                        .then(|| products.entry(f.path.clone()).or_insert_with(|| appname::product_name(&f.path)).clone())
-                        .flatten();
+                    let product = if appname::needs_product(&f.exe) {
+                        match cache.names.get(&f.path) {
+                            Some(n) => Some(n.clone()),
+                            None if names_tried.insert(f.path.clone()) => {
+                                let p = appname::product_name(&f.path);
+                                if let Some(p) = &p {
+                                    cache.names.insert(f.path.clone(), p.clone());
+                                    cache_dirty = true;
+                                }
+                                p
+                            }
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
                     appname::display_name(&f.exe, &f.title, product.as_deref())
                 });
-                let new_icon = fg
-                    .as_ref()
-                    .filter(|f| icon_tried.insert(f.path.clone()))
-                    .and_then(|f| sys::exe_icon(&f.path).map(|i| (f.path.clone(), Arc::new(i))));
+
+                let mut fresh: Vec<(String, Arc<Icon>)> = Vec::new();
+                if let Some(f) = fg.as_ref().filter(|f| icon_tried.insert(f.path.clone())) {
+                    let icon = appcache::load_icon(&f.path).or_else(|| {
+                        let icon = sys::exe_icon(&f.path)?;
+                        appcache::save_icon(&icon);
+                        Some(icon)
+                    });
+                    fresh.extend(icon.map(|i| (f.path.clone(), Arc::new(i))));
+                }
+                if let Some(domain) = site.filter(|d| sites_tried.insert(*d)) {
+                    let key = format!("site:{domain}");
+                    match appcache::load_icon(&key) {
+                        Some(i) => fresh.push((key, Arc::new(i))),
+                        // Primeira vez deste site: busca o ícone em segundo plano, uma vez, e guarda em disco.
+                        None => {
+                            let w = Arc::clone(&worker);
+                            std::thread::spawn(move || {
+                                if let Some(i) = appcache::fetch_site_icon(domain) {
+                                    w.lock().unwrap().icons.insert(i.key.clone(), Arc::new(i));
+                                }
+                            });
+                        }
+                    }
+                }
+
                 let mut s = worker.lock().unwrap();
-                s.icons.extend(new_icon);
+                s.icons.extend(fresh);
                 s.idle = idle;
                 s.current = name.clone();
                 if let (Some(f), Some(name)) = (fg, name) {
-                    s.icon_of.entry(name.clone()).or_insert_with(|| f.path.clone());
+                    // Site com ícone próprio usa o dele; senão, o do programa (o navegador).
+                    let key = site
+                        .map(|d| format!("site:{d}"))
+                        .filter(|k| s.icons.contains_key(k))
+                        .unwrap_or_else(|| f.path.clone());
+                    if s.icon_of.get(&name) != Some(&key) {
+                        s.icon_of.insert(name.clone(), key);
+                        cache_dirty = true;
+                    }
                     if Some(&f.exe) != me.as_ref() {
                         *s.session.entry(name.clone()).or_default() += 1;
                         *s.usage.days.entry(day_key(Local::now().date_naive())).or_default().entry(name).or_default() += 1;
@@ -158,8 +216,14 @@ impl Tracker {
                 ticks += 1;
                 if ticks % SAVE_EVERY == 0 {
                     let usage = s.usage.clone();
+                    if cache_dirty {
+                        cache.icon_of = s.icon_of.clone();
+                    }
                     drop(s);
                     save(&usage);
+                    if std::mem::take(&mut cache_dirty) {
+                        cache.save();
+                    }
                 }
             }
         });

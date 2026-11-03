@@ -1,5 +1,8 @@
 use eframe::egui::{self, Color32, CornerRadius, Theme, ThemePreference, vec2};
 
+/// Duração padrão dos esmaecimentos (abrir/fechar o widget, voltar da bandeja).
+pub const FADE_SECS: f32 = 0.25;
+
 pub const ACCENT: Color32 = Color32::from_rgb(120, 190, 255);
 pub const BG: Color32 = Color32::from_rgb(16, 18, 27);
 pub const CARD: Color32 = Color32::from_rgb(23, 26, 38);
