@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,6 +21,14 @@ pub struct Shared {
     pub session: BTreeMap<String, u64>,
     pub current: Option<String>,
     pub idle: bool,
+    pub icons: HashMap<String, Arc<Icon>>,
+}
+
+/// Ícone RGBA do executável.
+pub struct Icon {
+    pub w: usize,
+    pub h: usize,
+    pub rgba: Vec<u8>,
 }
 
 pub struct Snapshot {
@@ -28,6 +36,7 @@ pub struct Snapshot {
     pub session: BTreeMap<String, u64>,
     pub current: Option<String>,
     pub idle: bool,
+    pub icons: HashMap<String, Arc<Icon>>,
 }
 
 #[derive(Clone)]
@@ -68,12 +77,19 @@ impl Tracker {
             loop {
                 std::thread::sleep(Duration::from_secs(1));
                 let idle = sys::idle_secs() >= IDLE_SECS;
-                let app = if idle { None } else { sys::foreground_app() };
+                let fg = if idle { None } else { sys::foreground() };
+                let app = fg.as_ref().map(|f| f.name.clone());
                 let day = chrono::Local::now().format("%Y-%m-%d").to_string();
                 let mut s = worker.lock().unwrap();
                 s.idle = idle;
-                s.current = app.clone();
-                if let Some(name) = app.filter(|n| Some(n) != me.as_ref()) {
+                s.current = app;
+                if let Some(f) = fg.filter(|f| Some(&f.exe) != me.as_ref()) {
+                    let name = f.name;
+                    if !s.icons.contains_key(&name) {
+                        if let Some(icon) = sys::exe_icon(&f.path) {
+                            s.icons.insert(name.clone(), Arc::new(icon));
+                        }
+                    }
                     *s.session.entry(name.clone()).or_default() += 1;
                     *s.usage.days.entry(day).or_default().entry(name).or_default() += 1;
                 }
@@ -93,18 +109,43 @@ impl Tracker {
     /// Copia o estado atual para desenhar sem segurar o lock.
     pub fn snapshot(&self) -> Snapshot {
         let s = self.shared.lock().unwrap();
-        Snapshot { usage: s.usage.clone(), session: s.session.clone(), current: s.current.clone(), idle: s.idle }
+        Snapshot {
+            usage: s.usage.clone(),
+            session: s.session.clone(),
+            current: s.current.clone(),
+            idle: s.idle,
+            icons: s.icons.clone(),
+        }
     }
 }
 
 mod sys {
+    use std::ffi::c_void;
+
     use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Graphics::Gdi::{
+        BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits, GetObjectW,
+        ReleaseDC,
+    };
     use windows_sys::Win32::System::SystemInformation::GetTickCount;
     use windows_sys::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    use windows_sys::Win32::UI::Shell::ExtractIconExW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DestroyIcon, GetForegroundWindow, GetIconInfo, GetWindowTextW, GetWindowThreadProcessId, HICON, ICONINFO,
+    };
+
+    use super::Icon;
+
+    pub struct Foreground {
+        /// Nome mostrado (programa, ou site quando for um navegador).
+        pub name: String,
+        /// Nome do executável sem extensão.
+        pub exe: String,
+        pub path: String,
+    }
 
     pub fn idle_secs() -> u32 {
         unsafe {
@@ -116,8 +157,14 @@ mod sys {
         }
     }
 
-    /// Nome do executável (sem extensão) da janela em primeiro plano.
-    pub fn foreground_app() -> Option<String> {
+    fn window_title(hwnd: *mut c_void) -> String {
+        let mut buf = [0u16; 512];
+        let n = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+        String::from_utf16_lossy(&buf[..n.max(0) as usize])
+    }
+
+    /// Janela em primeiro plano: executável, caminho e nome de exibição.
+    pub fn foreground() -> Option<Foreground> {
         unsafe {
             let hwnd = GetForegroundWindow();
             if hwnd.is_null() {
@@ -139,9 +186,80 @@ mod sys {
             if ok == 0 {
                 return None;
             }
-            let full = String::from_utf16_lossy(&buf[..len as usize]);
-            let file = full.rsplit('\\').next()?;
-            Some(file.strip_suffix(".exe").or_else(|| file.strip_suffix(".EXE")).unwrap_or(file).to_owned())
+            let path = String::from_utf16_lossy(&buf[..len as usize]);
+            let file = path.rsplit('\\').next()?;
+            let exe = file.rsplit_once('.').map_or(file, |(stem, _)| stem).to_owned();
+            let name = crate::appname::display_name(&exe, &window_title(hwnd));
+            Some(Foreground { name, exe, path })
+        }
+    }
+
+    /// Ícone grande (32x32) do executável.
+    pub fn exe_icon(path: &str) -> Option<Icon> {
+        unsafe {
+            let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+            let mut large: HICON = std::ptr::null_mut();
+            if ExtractIconExW(wide.as_ptr(), 0, &mut large, std::ptr::null_mut(), 1) == 0 || large.is_null() {
+                return None;
+            }
+            let icon = icon_pixels(large);
+            DestroyIcon(large);
+            icon
+        }
+    }
+
+    unsafe fn bitmap_bgra(bmp: *mut c_void, w: i32, h: i32) -> Option<Vec<u8>> {
+        unsafe {
+            let mut bi: BITMAPINFO = std::mem::zeroed();
+            bi.bmiHeader = BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                ..std::mem::zeroed()
+            };
+            let mut buf = vec![0u8; (w * h * 4) as usize];
+            let dc = GetDC(std::ptr::null_mut());
+            let lines = GetDIBits(dc, bmp, 0, h as u32, buf.as_mut_ptr() as *mut c_void, &mut bi, DIB_RGB_COLORS);
+            ReleaseDC(std::ptr::null_mut(), dc);
+            (lines != 0).then_some(buf)
+        }
+    }
+
+    unsafe fn icon_pixels(icon: HICON) -> Option<Icon> {
+        unsafe {
+            let mut info: ICONINFO = std::mem::zeroed();
+            if GetIconInfo(icon, &mut info) == 0 {
+                return None;
+            }
+            let result = (|| {
+                if info.hbmColor.is_null() {
+                    return None;
+                }
+                let mut bm: BITMAP = std::mem::zeroed();
+                GetObjectW(info.hbmColor, size_of::<BITMAP>() as i32, &mut bm as *mut _ as *mut c_void);
+                let (w, h) = (bm.bmWidth, bm.bmHeight);
+                if w <= 0 || h <= 0 {
+                    return None;
+                }
+                let mut px = bitmap_bgra(info.hbmColor, w, h)?;
+                // Ícones antigos não têm canal alfa: usa a máscara.
+                if px.chunks_exact(4).all(|p| p[3] == 0) {
+                    let mask = bitmap_bgra(info.hbmMask, w, h)?;
+                    for (p, m) in px.chunks_exact_mut(4).zip(mask.chunks_exact(4)) {
+                        p[3] = if m[0] == 0 { 255 } else { 0 };
+                    }
+                }
+                for p in px.chunks_exact_mut(4) {
+                    p.swap(0, 2);
+                }
+                Some(Icon { w: w as usize, h: h as usize, rgba: px })
+            })();
+            DeleteObject(info.hbmColor);
+            DeleteObject(info.hbmMask);
+            result
         }
     }
 }

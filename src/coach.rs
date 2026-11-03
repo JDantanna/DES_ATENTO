@@ -1,11 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use chrono::{Datelike, Local};
 use eframe::egui::{self, Align2, Color32, FontId, Sense, vec2};
 
 use crate::theme::{ACCENT, BG};
-use crate::tracker::Tracker;
+use crate::tracker::{Icon, Tracker};
+use std::sync::Arc;
 
 #[derive(PartialEq, Clone, Copy)]
 enum Range {
@@ -28,6 +29,35 @@ pub struct CoachView {
     range: Range,
     widget: bool,
     widget_list: bool,
+    icons: HashMap<String, egui::TextureHandle>,
+}
+
+const ICON: f32 = 20.0;
+
+/// Textura do ícone do programa, criada na primeira vez que aparece.
+fn icon_tex(
+    cache: &mut HashMap<String, egui::TextureHandle>,
+    ctx: &egui::Context,
+    src: &HashMap<String, Arc<Icon>>,
+    name: &str,
+) -> Option<egui::TextureId> {
+    if !cache.contains_key(name) {
+        let icon = src.get(name)?;
+        let img = egui::ColorImage::from_rgba_unmultiplied([icon.w, icon.h], &icon.rgba);
+        cache.insert(name.to_owned(), ctx.load_texture(format!("app:{name}"), img, egui::TextureOptions::LINEAR));
+    }
+    cache.get(name).map(|t| t.id())
+}
+
+fn app_icon(ui: &mut egui::Ui, tex: Option<egui::TextureId>) {
+    match tex {
+        Some(id) => {
+            ui.image((id, vec2(ICON, ICON)));
+        }
+        None => {
+            ui.allocate_space(vec2(ICON, ICON));
+        }
+    }
 }
 
 /// Formato curto, para relatório e gráficos: `1h 05m`.
@@ -70,7 +100,7 @@ fn key(d: chrono::NaiveDate) -> String {
 
 impl CoachView {
     pub fn new() -> Self {
-        Self { range: Range::Hoje, widget: false, widget_list: false }
+        Self { range: Range::Hoje, widget: false, widget_list: false, icons: HashMap::new() }
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, tracker: &Tracker) {
@@ -84,14 +114,26 @@ impl CoachView {
                 ui.selectable_value(&mut self.range, Range::Semana, "7 dias");
                 ui.selectable_value(&mut self.range, Range::Mes, "30 dias");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.checkbox(&mut self.widget, "Widget flutuante");
+                    if fairy_button(ui, self.widget) {
+                        self.widget = !self.widget;
+                        if self.widget {
+                            // Abre o widget e recolhe a janela principal.
+                            ui.ctx().send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Minimized(true));
+                        }
+                    }
                 });
             });
             ui.add_space(6.0);
-            ui.weak(if idle {
-                "Ocioso (sem tempo contado)".to_owned()
-            } else {
-                format!("Agora: {}", current.as_deref().unwrap_or("—"))
+            ui.horizontal(|ui| {
+                if idle {
+                    ui.weak("Ocioso (sem tempo contado)");
+                } else if let Some(cur) = current.as_deref() {
+                    let tex = icon_tex(&mut self.icons, ui.ctx(), &snap.icons, cur);
+                    app_icon(ui, tex);
+                    ui.weak(format!("Agora: {cur}"));
+                } else {
+                    ui.weak("Agora: —");
+                }
             });
             ui.add_space(6.0);
 
@@ -126,12 +168,16 @@ impl CoachView {
             let max = apps.first().map(|a| a.1).unwrap_or(1).max(1);
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 for (name, secs) in apps {
-                    ui.add(
-                        egui::ProgressBar::new(secs as f32 / max as f32)
-                            .fill(ACCENT.gamma_multiply(0.6))
-                            .desired_width(ui.available_width())
-                            .text(format!("{name}   {}", fmt(secs))),
-                    );
+                    let tex = icon_tex(&mut self.icons, ui.ctx(), &snap.icons, &name);
+                    ui.horizontal(|ui| {
+                        app_icon(ui, tex);
+                        ui.add(
+                            egui::ProgressBar::new(secs as f32 / max as f32)
+                                .fill(ACCENT.gamma_multiply(0.6))
+                                .desired_width(ui.available_width())
+                                .text(format!("{name}   {}", fmt(secs))),
+                        );
+                    });
                 }
             });
         });
@@ -151,6 +197,10 @@ impl CoachView {
 
         let mut session: Vec<(&String, &u64)> = snap.session.iter().collect();
         session.sort_by(|a, b| b.1.cmp(a.1));
+        let ctx = ui.ctx().clone();
+        let cur_tex = snap.current.as_deref().filter(|_| !snap.idle).and_then(|c| icon_tex(&mut self.icons, &ctx, &snap.icons, c));
+        let rows_tex: Vec<Option<egui::TextureId>> =
+            session.iter().take(40).map(|(n, _)| icon_tex(&mut self.icons, &ctx, &snap.icons, n)).collect();
         let rows = session.len().min(7) as f32;
         let height = if self.widget_list { 176.0 + rows * 26.0 + 8.0 } else { 150.0 };
 
@@ -176,6 +226,9 @@ impl CoachView {
             }
             egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(14)).show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    if cur_tex.is_some() {
+                        app_icon(ui, cur_tex);
+                    }
                     ui.label(egui::RichText::new(&name).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if crate::chrome::close_button(ui).clicked() {
@@ -195,8 +248,9 @@ impl CoachView {
                         if session.is_empty() {
                             ui.weak("Nenhum programa registrado ainda.");
                         }
-                        for (app, secs) in &session {
+                        for (i, (app, secs)) in session.iter().enumerate() {
                             ui.horizontal(|ui| {
+                                app_icon(ui, rows_tex.get(i).copied().flatten());
                                 ui.label(egui::RichText::new(app.as_str()).strong());
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     ui.weak(fmt_long(**secs, false));
@@ -251,4 +305,18 @@ fn chart(ui: &mut egui::Ui, days: &[(chrono::NaiveDate, u64)]) {
             );
         }
     }
+}
+
+/// Botão com a Navi: as asas batem quando o mouse passa por cima. Retorna `true` ao clicar.
+fn fairy_button(ui: &mut egui::Ui, active: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(64.0, 44.0), Sense::click());
+    let amp = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.18);
+    let time = ui.input(|i| i.time) as f32;
+    let flap = (time * 22.0).sin() * amp;
+    if amp > 0.0 {
+        ui.ctx().request_repaint();
+    }
+    let glow = if active { 1.0 } else { amp };
+    crate::fairy::draw(ui.painter(), rect.center() + vec2(0.0, 2.0 - amp * (time * 11.0).sin().abs() * 2.0), 40.0, flap, glow);
+    resp.on_hover_text(if active { "Fechar widget" } else { "Abrir widget" }).clicked()
 }

@@ -20,6 +20,7 @@ $x = $t::GetTemplateContent('ToastText02')
 $n = $x.GetElementsByTagName('text')
 $n.Item(0).AppendChild($x.CreateTextNode($env:DA_TITLE)) | Out-Null
 $n.Item(1).AppendChild($x.CreateTextNode($env:DA_BODY)) | Out-Null
+$au = $x.CreateElement('audio'); $au.SetAttribute('silent','true'); $x.DocumentElement.AppendChild($au) | Out-Null
 $app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
 $toast = [Windows.UI.Notifications.ToastNotification, Windows.UI.Notifications, ContentType = WindowsRuntime]::new($x)
 $t::CreateToastNotifier($app).Show($toast)
@@ -27,6 +28,7 @@ $t::CreateToastNotifier($app).Show($toast)
 
 #[cfg(windows)]
 pub fn toast(title: &str, body: &str) {
+    crate::sound::hey_listen();
     use std::os::windows::process::CommandExt;
     let _ = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", TOAST])

@@ -1,11 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod appname;
 mod chrome;
 mod coach;
+mod fairy;
 mod ics;
 mod model;
 mod notify;
 mod planner;
+mod sound;
 mod splash;
 mod tasks;
 mod theme;

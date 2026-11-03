@@ -246,17 +246,21 @@ impl TasksView {
                     self.date_buf = today.format("%d/%m/%Y").to_string();
                     changed = true;
                 }
-                let parsed = NaiveTime::parse_from_str(self.time_buf.trim(), "%H:%M").ok();
-                let bad = !self.time_buf.trim().is_empty() && parsed.is_none();
+                let bad = !self.time_buf.is_empty() && NaiveTime::parse_from_str(&self.time_buf, "%H:%M").is_err();
                 let r = ui.add(
                     egui::TextEdit::singleline(&mut self.time_buf)
-                        .hint_text("hh:mm")
-                        .desired_width(60.0)
+                        .hint_text("HH:MM (24h)")
+                        .desired_width(90.0)
                         .text_color_opt(bad.then_some(Color32::LIGHT_RED)),
                 );
-                if r.changed() && (parsed.is_some() || self.time_buf.trim().is_empty()) {
-                    t.time = parsed;
-                    changed = true;
+                if r.changed() {
+                    let digits: String = self.time_buf.chars().filter(char::is_ascii_digit).take(4).collect();
+                    self.time_buf = format_time_digits(&digits);
+                    let parsed = NaiveTime::parse_from_str(&self.time_buf, "%H:%M").ok();
+                    if parsed.is_some() || self.time_buf.is_empty() {
+                        t.time = parsed;
+                        changed = true;
+                    }
                 }
             });
 
@@ -354,4 +358,21 @@ impl TasksView {
             self.buf_for = None;
         }
     }
+}
+
+/// Máscara de hora 24h: só dígitos, completa o zero à esquerda e põe os dois pontos.
+fn format_time_digits(digits: &str) -> String {
+    let mut d: Vec<char> = digits.chars().collect();
+    if d.first().is_some_and(|c| *c > '2') {
+        d.insert(0, '0');
+    }
+    if d.len() >= 2 && (d[0] == '2' && d[1] > '3') {
+        d[1] = '3';
+    }
+    if d.len() >= 3 && d[2] > '5' {
+        d.insert(2, '0');
+    }
+    d.truncate(4);
+    let s: String = d.iter().collect();
+    if s.len() > 2 { format!("{}:{}", &s[..2], &s[2..]) } else { s }
 }
