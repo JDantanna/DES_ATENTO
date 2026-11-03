@@ -325,7 +325,7 @@ impl Planner {
             let r = ui.add(
                 egui::TextEdit::singleline(&mut self.new_title)
                     .hint_text("Nova tarefa para este dia...")
-                    .desired_width(ui.available_width() - 70.0),
+                    .desired_width(crate::tasks::NEW_TASK_W),
             );
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if (ui.button("Criar").clicked() || enter) && !self.new_title.trim().is_empty() {

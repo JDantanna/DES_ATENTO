@@ -9,6 +9,8 @@ use crate::model::{Repeat, Store, Subtask, Task, tag_rgb};
 use crate::theme::ACCENT;
 
 const ROW_H: f32 = 42.0;
+/// Largura do campo de nova tarefa (basta para o título; o resto vai no editor).
+pub const NEW_TASK_W: f32 = 200.0;
 /// Cinza dos detalhes de cada tarefa.
 const DIM: Color32 = Color32::from_gray(140);
 
@@ -56,6 +58,8 @@ pub struct TasksView {
     buf_for: Option<u64>,
     msg: Option<String>,
     tags_open: bool,
+    /// Áreas dos botões de tag no quadro atual (um clique fora delas desfaz o filtro).
+    chip_rects: Vec<egui::Rect>,
     /// Texto em edição de cada tag no painel de tags.
     tag_edit: HashMap<String, String>,
 }
@@ -74,6 +78,7 @@ impl TasksView {
             buf_for: None,
             msg: None,
             tags_open: false,
+            chip_rects: Vec::new(),
             tag_edit: HashMap::new(),
         }
     }
@@ -98,6 +103,13 @@ impl TasksView {
             egui::CentralPanel::default().show(ui, |ui| self.list(ui, store));
         }
         self.tags_window(ui.ctx(), store);
+        // O filtro de tag vale só enquanto não se clica em outro lugar: clicar em qualquer ponto fora das tags o desfaz.
+        if self.tag_filter.is_some() && ui.input(|i| i.pointer.primary_clicked()) {
+            let pos = ui.input(|i| i.pointer.interact_pos());
+            if !pos.is_some_and(|p| self.chip_rects.iter().any(|r| r.contains(p))) {
+                self.tag_filter = None;
+            }
+        }
     }
 
     /// Painel para trocar a cor, renomear ou remover as tags.
@@ -164,7 +176,7 @@ impl TasksView {
             let r = ui.add(
                 egui::TextEdit::singleline(&mut self.new_title)
                     .hint_text("Nova tarefa...")
-                    .desired_width(ui.available_width() - 70.0),
+                    .desired_width(NEW_TASK_W),
             );
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if (ui.button("Criar").clicked() || enter) && !self.new_title.trim().is_empty() {
@@ -189,12 +201,15 @@ impl TasksView {
             ui.weak(m);
         }
         let tags = store.all_tags();
+        self.chip_rects.clear();
         if !tags.is_empty() {
             ui.horizontal_wrapped(|ui| {
                 tight(ui);
                 for t in &tags {
                     let on = self.tag_filter.as_ref() == Some(t);
-                    if tag_chip(ui, t, tag_rgb(&store.tag_colors, t), on, "").clicked() {
+                    let chip = tag_chip(ui, t, tag_rgb(&store.tag_colors, t), on, "");
+                    self.chip_rects.push(chip.rect);
+                    if chip.clicked() {
                         self.tag_filter = if on { None } else { Some(t.clone()) };
                     }
                 }
@@ -466,6 +481,30 @@ impl TasksView {
                     }
                 }
             });
+            if t.repeat != Repeat::None {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("Termina");
+                    let label = match t.repeat_times {
+                        None => "Nunca".to_owned(),
+                        Some(n) => format!("Após {n} {}", if n == 1 { "vez" } else { "vezes" }),
+                    };
+                    egui::ComboBox::from_id_salt("repeat_end").selected_text(label).show_ui(ui, |ui| {
+                        changed |= ui.selectable_value(&mut t.repeat_times, None, "Nunca").changed();
+                        if ui.selectable_label(t.repeat_times.is_some(), "Após um número de vezes").clicked() {
+                            if t.repeat_times.is_none() {
+                                t.repeat_times = Some(3);
+                                changed = true;
+                            }
+                            ui.close();
+                        }
+                    });
+                    if let Some(n) = &mut t.repeat_times {
+                        changed |= ui.add(egui::DragValue::new(n).range(1..=999)).changed();
+                        ui.weak("ocorrências, contando esta");
+                    }
+                });
+            }
 
             ui.add_space(8.0);
             ui.label("Tags");

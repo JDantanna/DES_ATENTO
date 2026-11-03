@@ -210,19 +210,12 @@ impl App {
         .on_hover_text("Tamanho da interface");
     }
 
-    /// A logo balança quando o mouse passa por cima.
+    /// A logo só cresce um pouco quando o mouse passa por cima.
     fn logo_ui(&self, ui: &mut egui::Ui) {
         let size = vec2(24.0, 24.0);
         let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
-        let amp = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.2);
-        let t = ui.input(|i| i.time) as f32;
-        if amp > 0.0 {
-            ui.ctx().request_repaint();
-        }
-        let lift = (t * 9.0).sin().abs() * 3.0 * amp;
-        egui::Image::new((self.logo.id(), size))
-            .rotate((t * 12.0).sin() * 0.35 * amp, vec2(0.5, 0.5))
-            .paint_at(ui, rect.translate(vec2(0.0, -lift)));
+        let grow = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.15);
+        egui::Image::new((self.logo.id(), size)).paint_at(ui, egui::Rect::from_center_size(rect.center(), size * (1.0 + 0.25 * grow)));
     }
 
     /// Aplica a escolha de minimizar (bandeja ou só minimizar).

@@ -92,6 +92,9 @@ pub struct Task {
     /// Dia do mês de referência da recorrência mensal/anual (o dia 30 volta ao 30 depois de fevereiro).
     #[serde(default)]
     pub anchor_day: u32,
+    /// Repetição finita: quantas ocorrências faltam, contando a da data atual. `None` = para sempre.
+    #[serde(default)]
+    pub repeat_times: Option<u32>,
 }
 
 fn one() -> u32 {
@@ -123,19 +126,32 @@ impl Task {
     }
 
     /// Ao concluir uma tarefa recorrente, ela volta pendente na próxima data futura.
+    /// Em repetição finita, a última ocorrência concluída fica concluída de vez.
     /// Retorna `true` se a tarefa foi reagendada.
     pub fn roll_over(&mut self) -> bool {
         if self.repeat == Repeat::None || !self.done {
             return false;
         }
         let today = Local::now().date_naive();
+        // Ocorrências que ainda restam depois desta (as puladas por atraso também contam).
+        let mut left = self.repeat_times.map(|n| n as i64 - 1);
         let mut next = self.next_after(self.date.unwrap_or(today));
         for _ in 0..2000 {
+            if left.is_some_and(|n| n <= 0) {
+                self.repeat_times = Some(1);
+                return false;
+            }
             if next >= today {
                 break;
             }
+            left = left.map(|n| n - 1);
             next = self.next_after(next);
         }
+        if left.is_some_and(|n| n <= 0) {
+            self.repeat_times = Some(1);
+            return false;
+        }
+        self.repeat_times = left.map(|n| n as u32);
         self.date = Some(next);
         self.done = false;
         self.subtasks.iter_mut().for_each(|s| s.done = false);
@@ -155,13 +171,15 @@ impl Task {
         let anchor = self.anchor(start);
         let months = (d.year() - start.year()) as i64 * 12 + d.month0() as i64 - start.month0() as i64;
         let on_day = d.day() == anchor.min(days_in_month(d.year(), d.month()));
-        match self.repeat {
-            Repeat::None => false,
-            Repeat::Daily => (d - start).num_days() % n == 0,
-            Repeat::Weekly => (d - start).num_days() % (7 * n) == 0,
-            Repeat::Monthly => months % n == 0 && on_day,
-            Repeat::Yearly => months % (12 * n) == 0 && on_day,
-        }
+        // Número da ocorrência (0 = a da data de início), se `d` for um dia em que a tarefa repete.
+        let nth = match self.repeat {
+            Repeat::None => None,
+            Repeat::Daily => ((d - start).num_days() % n == 0).then(|| (d - start).num_days() / n),
+            Repeat::Weekly => ((d - start).num_days() % (7 * n) == 0).then(|| (d - start).num_days() / (7 * n)),
+            Repeat::Monthly => (months % n == 0 && on_day).then(|| months / n),
+            Repeat::Yearly => (months % (12 * n) == 0 && on_day).then(|| months / (12 * n)),
+        };
+        nth.is_some_and(|k| self.repeat_times.is_none_or(|total| k < total as i64))
     }
 
     pub fn subtasks_done(&self) -> (usize, usize) {
@@ -209,6 +227,7 @@ impl Store {
             repeat: Repeat::None,
             every: 1,
             anchor_day: 0,
+            repeat_times: None,
         });
         self.dirty = true;
         self.next_id
@@ -326,6 +345,34 @@ mod tests {
         assert!(t.occurs_on(NaiveDate::from_ymd_opt(2026, 2, 28).unwrap()));
         assert!(!t.occurs_on(NaiveDate::from_ymd_opt(2026, 3, 29).unwrap()));
         assert!(!t.occurs_on(NaiveDate::from_ymd_opt(2025, 12, 30).unwrap()));
+    }
+
+    #[test]
+    fn repeticao_finita_de_3_meses() {
+        let mut t = rent();
+        t.date = NaiveDate::from_ymd_opt(2026, 1, 5);
+        t.set_anchor();
+        t.repeat_times = Some(3);
+        let d = |m, day| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
+        assert!(t.occurs_on(d(1, 5)) && t.occurs_on(d(2, 5)) && t.occurs_on(d(3, 5)));
+        assert!(!t.occurs_on(d(4, 5)) && !t.occurs_on(d(5, 5)));
+        t.repeat_times = None;
+        assert!(t.occurs_on(d(4, 5)));
+    }
+
+    #[test]
+    fn ultima_ocorrencia_conclui_de_vez() {
+        let mut t = rent();
+        t.date = Some(Local::now().date_naive());
+        t.repeat = Repeat::Daily;
+        t.repeat_times = Some(2);
+        t.done = true;
+        assert!(t.roll_over()); // sobra uma ocorrência
+        assert_eq!(t.repeat_times, Some(1));
+        assert!(!t.done);
+        t.done = true;
+        assert!(!t.roll_over()); // era a última
+        assert!(t.done);
     }
 
     #[test]

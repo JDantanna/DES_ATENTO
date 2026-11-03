@@ -377,17 +377,17 @@ fn chart(ui: &mut egui::Ui, days: &[(chrono::NaiveDate, u64)]) {
 
 /// Botão da fadinha: as asas batem quando o mouse passa por cima. Retorna `true` ao clicar.
 fn fairy_button(ui: &mut egui::Ui, active: bool) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(vec2(64.0, 44.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(64.0, 52.0), Sense::click());
     let amp = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.18);
     let time = ui.input(|i| i.time) as f32;
-    // Cerca de 2 batidas por segundo: rápido o bastante para parecer voo, devagar o bastante para ver as asas.
-    let flap = (time * 13.0).sin() * amp;
+    // Uma batida a cada 0,4 s, o ritmo medido no vídeo de referência.
+    let flap = (time * 15.7).sin() * amp;
     if amp > 0.0 {
         ui.ctx().request_repaint();
     }
     let glow = if active { 1.0 } else { amp };
     // Em hover ela voa em oito, subindo e descendo, enquanto bate as asas.
     let sway = vec2((time * 5.0).sin() * 5.0, (time * 10.0).sin() * 4.0) * amp;
-    crate::fairy::draw(ui.painter(), rect.center() + vec2(0.0, 2.0) + sway, 40.0 + 6.0 * amp, flap, glow);
+    crate::fairy::draw(ui.painter(), rect.center() + vec2(0.0, 7.0) + sway, 40.0 + 6.0 * amp, flap, glow);
     resp.on_hover_text(if active { "Fechar widget" } else { "Abrir widget" }).clicked()
 }
