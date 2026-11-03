@@ -4,7 +4,7 @@ use std::time::Duration;
 use chrono::{Datelike, Local};
 use eframe::egui::{self, Align2, Color32, FontId, Sense, vec2};
 
-use crate::theme::ACCENT;
+use crate::theme::{ACCENT, BG};
 use crate::tracker::Tracker;
 
 #[derive(PartialEq, Clone, Copy)]
@@ -27,8 +27,10 @@ impl Range {
 pub struct CoachView {
     range: Range,
     widget: bool,
+    widget_list: bool,
 }
 
+/// Formato curto, para relatório e gráficos: `1h 05m`.
 pub fn fmt(secs: u64) -> String {
     let (h, m) = (secs / 3600, secs % 3600 / 60);
     match (h, m) {
@@ -39,17 +41,41 @@ pub fn fmt(secs: u64) -> String {
     }
 }
 
+/// Tempo por extenso: `1 hora, 23 minutos e 5 segundos`.
+pub fn fmt_long(secs: u64, with_secs: bool) -> String {
+    let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
+    let unit = |n: u64, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let mut parts = Vec::new();
+    if h > 0 {
+        parts.push(unit(h, "hora", "horas"));
+    }
+    if m > 0 {
+        parts.push(unit(m, "minuto", "minutos"));
+    }
+    if (s > 0 && with_secs) || parts.is_empty() {
+        parts.push(unit(s, "segundo", "segundos"));
+    }
+    match parts.len() {
+        1 => parts.remove(0),
+        _ => {
+            let last = parts.pop().unwrap();
+            format!("{} e {last}", parts.join(", "))
+        }
+    }
+}
+
 fn key(d: chrono::NaiveDate) -> String {
     d.format("%Y-%m-%d").to_string()
 }
 
 impl CoachView {
     pub fn new() -> Self {
-        Self { range: Range::Hoje, widget: false }
+        Self { range: Range::Hoje, widget: false, widget_list: false }
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, tracker: &Tracker) {
-        let (usage, current, idle) = tracker.snapshot();
+        let snap = tracker.snapshot();
+        let (usage, current, idle) = (snap.usage, snap.current, snap.idle);
         let today = Local::now().date_naive();
 
         egui::CentralPanel::default().show(ui, |ui| {
@@ -109,7 +135,6 @@ impl CoachView {
                 }
             });
         });
-
     }
 
     /// Janela flutuante; deve ser chamada a cada quadro, qualquer que seja a aba.
@@ -118,31 +143,73 @@ impl CoachView {
             return;
         }
         ui.ctx().request_repaint_after(Duration::from_secs(1));
-        let (usage, current, idle) = tracker.snapshot();
-        let current = current.as_deref();
-        let today = usage.days.get(&key(Local::now().date_naive()));
-        let app_secs = current.and_then(|c| today.and_then(|t| t.get(c))).copied().unwrap_or(0);
+        let snap = tracker.snapshot();
+        let today = snap.usage.days.get(&key(Local::now().date_naive()));
+        let app_secs = snap.current.as_deref().and_then(|c| today.and_then(|t| t.get(c))).copied().unwrap_or(0);
         let total: u64 = today.map(|t| t.values().sum()).unwrap_or(0);
-        let name = if idle { "Ocioso".to_owned() } else { current.unwrap_or("—").to_owned() };
+        let name = if snap.idle { "Ocioso".to_owned() } else { snap.current.clone().unwrap_or_else(|| "—".to_owned()) };
+
+        let mut session: Vec<(&String, &u64)> = snap.session.iter().collect();
+        session.sort_by(|a, b| b.1.cmp(a.1));
+        let rows = session.len().min(7) as f32;
+        let height = if self.widget_list { 176.0 + rows * 26.0 + 8.0 } else { 150.0 };
 
         let builder = egui::ViewportBuilder::default()
-            .with_title("Des_Atento · Coach")
-            .with_inner_size([230.0, 90.0])
+            .with_title("Navi · Coach")
+            .with_inner_size([340.0, height])
+            .with_decorations(false)
+            .with_transparent(true)
             .with_always_on_top()
-            .with_resizable(false)
-            .with_maximize_button(false)
-            .with_minimize_button(false);
+            .with_resizable(false);
         let mut close = false;
+        let mut toggle_list = false;
+        let open = self.widget_list;
         ui.ctx().show_viewport_immediate(egui::ViewportId::from_hash_of("coach_widget"), builder, |ui, _class| {
-            egui::CentralPanel::default().show(ui, |ui| {
-                ui.label(egui::RichText::new(&name).strong());
-                ui.label(egui::RichText::new(fmt(app_secs)).size(26.0).color(ACCENT));
-                ui.weak(format!("Hoje no total: {}", fmt(total)));
-            });
-            if ui.ctx().input(|i| i.viewport().close_requested()) {
-                close = true;
+            let full = ui.max_rect();
+            ui.painter().rect_filled(full, 14.0, BG);
+            ui.painter().rect_stroke(full, 14.0, egui::Stroke::new(1.0, Color32::from_white_alpha(22)), egui::StrokeKind::Inside);
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(340.0, height)));
+
+            let drag = ui.interact(full, ui.scope_id().with("widget_drag"), Sense::click_and_drag());
+            if drag.drag_started() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
+            egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(14)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(&name).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if crate::chrome::close_button(ui).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+                ui.label(egui::RichText::new(fmt_long(app_secs, true)).size(19.0).color(ACCENT));
+                ui.weak(format!("Hoje, no total: {}", fmt_long(total, false)));
+                ui.add_space(2.0);
+                let label = format!("{} Programas desta sessão ({})", if open { "−" } else { "+" }, session.len());
+                if ui.add(egui::Button::new(label).frame(false)).clicked() {
+                    toggle_list = true;
+                }
+                if open {
+                    egui::ScrollArea::vertical().max_height(7.0 * 26.0).show(ui, |ui| {
+                        if session.is_empty() {
+                            ui.weak("Nenhum programa registrado ainda.");
+                        }
+                        for (app, secs) in &session {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(app.as_str()).strong());
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.weak(fmt_long(**secs, false));
+                                });
+                            });
+                        }
+                    });
+                }
+            });
         });
+        if toggle_list {
+            self.widget_list = !self.widget_list;
+        }
         if close {
             self.widget = false;
         }

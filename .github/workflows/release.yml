@@ -20,7 +20,12 @@ jobs:
       - name: Compilar e gerar instalador
         shell: pwsh
         run: ./build.ps1
+      - name: Copia com o nome antigo (para versoes anteriores se atualizarem)
+        shell: pwsh
+        run: Copy-Item dist/Navi_Setup.exe dist/Des_Atento_Setup.exe
       - name: Publicar release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/Des_Atento_Setup.exe
+          files: |
+            dist/Navi_Setup.exe
+            dist/Des_Atento_Setup.exe

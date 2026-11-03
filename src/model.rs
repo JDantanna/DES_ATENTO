@@ -3,6 +3,17 @@ use std::path::PathBuf;
 use chrono::{NaiveDate, NaiveTime};
 use serde::{Deserialize, Serialize};
 
+/// Pasta de dados do app (`%APPDATA%\Navi`). Migra a antiga `Des_Atento` na primeira execução.
+pub fn data_dir() -> PathBuf {
+    let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let new = base.join("Navi");
+    let old = base.join("Des_Atento");
+    if !new.exists() && old.exists() {
+        let _ = std::fs::rename(&old, &new);
+    }
+    new
+}
+
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct Subtask {
     pub title: String,
@@ -70,8 +81,7 @@ impl Store {
     }
 
     fn path() -> PathBuf {
-        let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-        base.join("Des_Atento").join("tasks.json")
+        data_dir().join("tasks.json")
     }
 
     pub fn load() -> Self {

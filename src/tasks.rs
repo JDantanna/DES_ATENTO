@@ -176,7 +176,7 @@ impl TasksView {
         }
         if ui.button("Exportar tarefas com data (.ics)").clicked() {
             ui.close();
-            if let Some(path) = rfd::FileDialog::new().add_filter("Calendário", &["ics"]).set_file_name("des_atento.ics").save_file() {
+            if let Some(path) = rfd::FileDialog::new().add_filter("Calendário", &["ics"]).set_file_name("navi.ics").save_file() {
                 self.msg = Some(match std::fs::write(&path, ics::export(store)) {
                     Ok(()) => "Exportado.".to_owned(),
                     Err(e) => format!("Falha ao salvar: {e}"),

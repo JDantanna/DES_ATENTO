@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 /// Repositório "usuario/nome" que publica as releases. Troque pelo seu.
 const REPO: &str = "JDantanna/DES_ATENTO";
-const ASSET: &str = "Des_Atento_Setup.exe";
+const ASSET: &str = "Navi_Setup.exe";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone, Default, PartialEq)]
@@ -39,7 +39,7 @@ fn parse(v: &str) -> Vec<u32> {
 
 fn check_blocking() -> Result<State, String> {
     let out = curl()
-        .args(["-sSL", "--max-time", "15", "-H", "User-Agent: Des_Atento", "-H", "Accept: application/vnd.github+json"])
+        .args(["-sSL", "--max-time", "15", "-H", "User-Agent: Navi", "-H", "Accept: application/vnd.github+json"])
         .arg(format!("https://api.github.com/repos/{REPO}/releases/latest"))
         .output()
         .map_err(|e| format!("curl indisponível: {e}"))?;
@@ -78,7 +78,7 @@ impl Updater {
     }
 
     /// Baixa o instalador, executa em modo silencioso e encerra o app;
-    /// o instalador fecha/reabre o Des_Atento sozinho.
+    /// o instalador fecha/reabre o Navi sozinho.
     pub fn install(&self, url: String, ctx: eframe::egui::Context) {
         self.set(State::Downloading);
         let this = self.clone();

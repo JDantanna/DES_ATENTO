@@ -1,4 +1,4 @@
-# Gera dist\Des_Atento_Setup.exe (release otimizado + instalador).
+# Gera dist\Navi_Setup.exe (release otimizado + instalador).
 # Sem 'Stop': o cargo escreve progresso no stderr; os erros são checados por $LASTEXITCODE.
 Set-Location $PSScriptRoot
 
@@ -13,6 +13,6 @@ $iscc = @(
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $iscc) { throw 'Inno Setup 6 nao encontrado' }
 
-& $iscc "/DAppVersion=$version" installer\des_atento.iss
+& $iscc "/DAppVersion=$version" installer\navi.iss
 if ($LASTEXITCODE -ne 0) { throw 'ISCC falhou' }
-"Pronto: dist\Des_Atento_Setup.exe (v$version)"
+"Pronto: dist\Navi_Setup.exe (v$version)"

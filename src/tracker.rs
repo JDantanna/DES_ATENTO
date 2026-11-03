@@ -17,6 +17,15 @@ pub struct Usage {
 #[derive(Default)]
 pub struct Shared {
     pub usage: Usage,
+    /// Segundos por programa desde que o app foi aberto.
+    pub session: BTreeMap<String, u64>,
+    pub current: Option<String>,
+    pub idle: bool,
+}
+
+pub struct Snapshot {
+    pub usage: Usage,
+    pub session: BTreeMap<String, u64>,
     pub current: Option<String>,
     pub idle: bool,
 }
@@ -27,8 +36,7 @@ pub struct Tracker {
 }
 
 fn path() -> PathBuf {
-    let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    base.join("Des_Atento").join("usage.json")
+    crate::model::data_dir().join("usage.json")
 }
 
 fn save(usage: &Usage) {
@@ -66,6 +74,7 @@ impl Tracker {
                 s.idle = idle;
                 s.current = app.clone();
                 if let Some(name) = app.filter(|n| Some(n) != me.as_ref()) {
+                    *s.session.entry(name.clone()).or_default() += 1;
                     *s.usage.days.entry(day).or_default().entry(name).or_default() += 1;
                 }
                 ticks += 1;
@@ -82,9 +91,9 @@ impl Tracker {
     }
 
     /// Copia o estado atual para desenhar sem segurar o lock.
-    pub fn snapshot(&self) -> (Usage, Option<String>, bool) {
+    pub fn snapshot(&self) -> Snapshot {
         let s = self.shared.lock().unwrap();
-        (s.usage.clone(), s.current.clone(), s.idle)
+        Snapshot { usage: s.usage.clone(), session: s.session.clone(), current: s.current.clone(), idle: s.idle }
     }
 }
 

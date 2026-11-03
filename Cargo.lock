@@ -298,19 +298,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
-name = "des_atento"
-version = "0.2.0"
-dependencies = [
- "chrono",
- "eframe",
- "rfd",
- "serde",
- "serde_json",
- "windows-sys 0.61.2",
- "winresource",
-]
-
-[[package]]
 name = "dispatch"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1018,6 +1005,19 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
+]
+
+[[package]]
+name = "navi"
+version = "0.3.0"
+dependencies = [
+ "chrono",
+ "eframe",
+ "rfd",
+ "serde",
+ "serde_json",
+ "windows-sys 0.61.2",
+ "winresource",
 ]
 
 [[package]]

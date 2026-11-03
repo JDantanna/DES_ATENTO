@@ -37,7 +37,7 @@ fn unesc(s: &str) -> String {
 
 pub fn export(store: &Store) -> String {
     let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
-    let mut o = String::from("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Des_Atento//PT\r\nCALSCALE:GREGORIAN\r\n");
+    let mut o = String::from("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Navi//PT\r\nCALSCALE:GREGORIAN\r\n");
     for t in store.tasks.iter().filter(|t| t.date.is_some()) {
         let d = t.date.unwrap();
         o.push_str("BEGIN:VEVENT\r\n");
