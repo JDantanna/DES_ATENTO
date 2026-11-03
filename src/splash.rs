@@ -7,8 +7,7 @@ const HEAD_FADE_IN: f32 = 0.8;
 /// Instante em que a primeira tarefa começa a surgir.
 const FIRST_TASK_AT: f32 = 1.5;
 const TASK_FADE_IN: f32 = 0.6;
-const END_HOLD: f32 = 1.6;
-const FADE_OUT: f32 = 0.7;
+const LEAVE_FADE: f32 = 0.35;
 const MAX_LINES: usize = 8;
 pub const DIAS: [&str; 7] = [
     "segunda-feira",
@@ -26,6 +25,8 @@ pub const MESES: [&str; 12] = [
 
 pub struct Splash {
     start: Option<f64>,
+    /// Instante do clique que encerra a abertura (inicia o fade final).
+    leaving: Option<f64>,
     header: String,
     tasks: Vec<String>,
     /// Intervalo entre o surgimento de uma tarefa e a seguinte.
@@ -51,18 +52,15 @@ impl Splash {
             tasks.push(format!("e mais {extra}..."));
         }
         let gap = (0.5f32).min(3.5 / tasks.len() as f32);
-        Self { start: None, header, tasks, gap }
+        Self { start: None, leaving: None, header, tasks, gap }
     }
 
     fn task_start(&self, i: usize) -> f32 {
         FIRST_TASK_AT + i as f32 * self.gap
     }
 
-    fn fade_out_at(&self) -> f32 {
-        self.task_start(self.tasks.len() - 1) + TASK_FADE_IN + END_HOLD
-    }
-
-    /// Desenha a abertura. Retorna `true` quando terminou (ou foi pulada).
+    /// Desenha a abertura. Retorna `true` quando terminou. Depois que todas as tarefas
+    /// aparecem, a tela espera um clique (ou Enter/Esc) para seguir.
     pub fn show(&mut self, root: &mut egui::Ui) -> bool {
         let ctx = root.ctx().clone();
         let ctx = &ctx;
@@ -70,14 +68,20 @@ impl Splash {
         let start = *self.start.get_or_insert(now);
         let t = (now - start) as f32;
 
-        let skip = ctx.input(|i| {
+        let advance = ctx.input(|i| {
             i.pointer.any_click() || i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Enter)
         });
-        let out_at = self.fade_out_at();
-        if skip || t >= out_at + FADE_OUT {
+        if advance && self.leaving.is_none() {
+            self.leaving = Some(now);
+        }
+        let master = match self.leaving {
+            Some(at) => 1.0 - ((now - at) as f32 / LEAVE_FADE).clamp(0.0, 1.0),
+            None => 1.0,
+        };
+        if master <= 0.0 {
             return true;
         }
-        let master = 1.0 - ((t - out_at) / FADE_OUT).clamp(0.0, 1.0);
+        let all_in = t >= self.task_start(self.tasks.len() - 1) + TASK_FADE_IN;
 
         egui::CentralPanel::default().show(root, |ui| {
             let rect = ui.max_rect();
@@ -85,34 +89,46 @@ impl Splash {
             let block = 84.0 + 24.0 + self.tasks.len() as f32 * line;
             let top = rect.center().y - block / 2.0;
             let x = rect.center().x;
-            let paint = |text: &str, y: f32, size: f32, a: f32, color: Color32| {
+            let paint = |text: &str, pos: egui::Pos2, align: Align2, size: f32, a: f32| {
                 let a = (a * master).clamp(0.0, 1.0);
-                let rise = (1.0 - a) * 8.0;
                 ui.painter().text(
-                    egui::pos2(x, y + rise),
-                    Align2::CENTER_TOP,
+                    pos + egui::vec2(0.0, (1.0 - a) * 8.0),
+                    align,
                     text,
                     FontId::proportional(size),
-                    color.gamma_multiply(a),
+                    Color32::WHITE.gamma_multiply(a),
                 );
             };
+            // Título centralizado.
             paint(
                 &format!("{}\nSuas tarefas para hoje são", self.header),
-                top,
+                egui::pos2(x, top),
+                Align2::CENTER_TOP,
                 28.0,
                 smooth(t / HEAD_FADE_IN),
-                Color32::WHITE,
             );
+            // Tarefas alinhadas à esquerda, num bloco centralizado pela linha mais larga.
+            let widest = self
+                .tasks
+                .iter()
+                .map(|s| ui.painter().layout_no_wrap(s.clone(), FontId::proportional(30.0), Color32::WHITE).size().x)
+                .fold(0.0, f32::max);
+            let left = x - widest / 2.0;
             for (i, task) in self.tasks.iter().enumerate() {
                 let a = smooth((t - self.task_start(i)) / TASK_FADE_IN);
-                paint(task, top + 108.0 + i as f32 * line, 30.0, a, Color32::WHITE);
+                paint(task, egui::pos2(left, top + 108.0 + i as f32 * line), Align2::LEFT_TOP, 30.0, a);
             }
+            let (hint, pulse) = if all_in {
+                ("clique para continuar", 0.55 + 0.35 * ((t * 3.0).sin() * 0.5 + 0.5))
+            } else {
+                ("clique para pular", 0.5)
+            };
             ui.painter().text(
                 rect.center_bottom() - egui::vec2(0.0, 24.0),
                 Align2::CENTER_CENTER,
-                "clique para pular",
+                hint,
                 FontId::proportional(12.0),
-                ACCENT.gamma_multiply(0.5 * master),
+                ACCENT.gamma_multiply(pulse * master),
             );
         });
         ctx.request_repaint();

@@ -104,6 +104,7 @@ impl CoachView {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, tracker: &Tracker) {
+        ui.ctx().request_repaint_after(Duration::from_secs(2));
         let snap = tracker.snapshot();
         let (usage, current, idle) = (snap.usage, snap.current, snap.idle);
         let today = Local::now().date_naive();

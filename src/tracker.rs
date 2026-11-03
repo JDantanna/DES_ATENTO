@@ -74,28 +74,32 @@ impl Tracker {
                 .ok()
                 .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
             let mut ticks = 0u32;
+            // Programas cujo ícone já foi buscado (com ou sem sucesso): a busca é feita uma vez só e fora do lock.
+            let mut icon_tried: std::collections::HashSet<String> = std::collections::HashSet::new();
             loop {
                 std::thread::sleep(Duration::from_secs(1));
                 let idle = sys::idle_secs() >= IDLE_SECS;
                 let fg = if idle { None } else { sys::foreground() };
                 let app = fg.as_ref().map(|f| f.name.clone());
                 let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+                let new_icon = fg
+                    .as_ref()
+                    .filter(|f| icon_tried.insert(f.name.clone()))
+                    .and_then(|f| sys::exe_icon(&f.path).map(|i| (f.name.clone(), Arc::new(i))));
                 let mut s = worker.lock().unwrap();
+                s.icons.extend(new_icon);
                 s.idle = idle;
                 s.current = app;
                 if let Some(f) = fg.filter(|f| Some(&f.exe) != me.as_ref()) {
                     let name = f.name;
-                    if !s.icons.contains_key(&name) {
-                        if let Some(icon) = sys::exe_icon(&f.path) {
-                            s.icons.insert(name.clone(), Arc::new(icon));
-                        }
-                    }
                     *s.session.entry(name.clone()).or_default() += 1;
                     *s.usage.days.entry(day).or_default().entry(name).or_default() += 1;
                 }
                 ticks += 1;
                 if ticks % SAVE_EVERY == 0 {
-                    save(&s.usage);
+                    let usage = s.usage.clone();
+                    drop(s);
+                    save(&usage);
                 }
             }
         });

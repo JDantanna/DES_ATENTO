@@ -12,13 +12,21 @@ pub enum Glyph {
     Maximize,
     Restore,
     Close,
+    Refresh,
+    Trash,
 }
 
 pub fn window_button(ui: &mut egui::Ui, glyph: Glyph) -> Response {
+    icon_button(ui, glyph, 0.0)
+}
+
+/// Botão de ícone desenhado em código. `spin` gira o ícone (em radianos; só o `Refresh`).
+pub fn icon_button(ui: &mut egui::Ui, glyph: Glyph, spin: f32) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(36.0, 28.0), Sense::click());
     let hot = resp.hovered();
     let bg = match (hot, glyph) {
         (true, Glyph::Close) => Some(Color32::from_rgb(200, 60, 70)),
+        (true, Glyph::Trash) => Some(Color32::from_rgba_unmultiplied(200, 60, 70, 90)),
         (true, _) => Some(Color32::from_white_alpha(22)),
         _ => None,
     };
@@ -44,6 +52,34 @@ pub fn window_button(ui: &mut egui::Ui, glyph: Glyph) -> Response {
         Glyph::Close => {
             p.line_segment([c + vec2(-5.0, -5.0), c + vec2(5.0, 5.0)], st);
             p.line_segment([c + vec2(-5.0, 5.0), c + vec2(5.0, -5.0)], st);
+        }
+        Glyph::Refresh => {
+            // Arco de 280° com ponta de seta: o símbolo universal de atualizar.
+            let r = 6.0;
+            let a0 = spin - 1.0;
+            let a1 = a0 + 4.9;
+            let pt = |a: f32| c + vec2(a.cos(), a.sin()) * r;
+            let pts: Vec<_> = (0..=18).map(|i| pt(a0 + (a1 - a0) * i as f32 / 18.0)).collect();
+            p.add(egui::Shape::line(pts, st));
+            let tip = pt(a1);
+            let dir = vec2(-a1.sin(), a1.cos());
+            let out = vec2(a1.cos(), a1.sin());
+            p.add(egui::Shape::convex_polygon(
+                vec![tip + dir * 4.0, tip + out * 3.4 - dir * 0.8, tip - out * 3.4 - dir * 0.8],
+                col,
+                Stroke::NONE,
+            ));
+        }
+        Glyph::Trash => {
+            p.line_segment([c + vec2(-6.0, -4.0), c + vec2(6.0, -4.0)], st); // tampa
+            p.rect_stroke(Rect::from_min_max(c + vec2(-2.0, -6.5), c + vec2(2.0, -4.0)), 1.0, st, egui::StrokeKind::Middle); // alça
+            p.add(egui::Shape::closed_line(
+                vec![c + vec2(-4.6, -2.0), c + vec2(4.6, -2.0), c + vec2(3.8, 6.5), c + vec2(-3.8, 6.5)],
+                st,
+            )); // corpo
+            let thin = Stroke::new(1.1, col);
+            p.line_segment([c + vec2(-1.5, 0.0), c + vec2(-1.3, 4.5)], thin);
+            p.line_segment([c + vec2(1.5, 0.0), c + vec2(1.3, 4.5)], thin);
         }
     }
     resp

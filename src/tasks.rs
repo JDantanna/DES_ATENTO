@@ -2,7 +2,9 @@ use chrono::{Local, NaiveDate, NaiveTime};
 use eframe::egui::{self, Color32, RichText};
 
 use crate::ics;
-use crate::model::{Store, Subtask, Task};
+use crate::chrome::{self, Glyph};
+use crate::model::{Repeat, Store, Subtask, Task};
+use crate::theme::ACCENT;
 
 #[derive(PartialEq, Clone, Copy)]
 enum Filter {
@@ -79,7 +81,7 @@ impl TasksView {
             ui.selectable_value(&mut self.filter, Filter::Pendentes, "Pendentes");
             ui.selectable_value(&mut self.filter, Filter::Todas, "Todas");
             ui.selectable_value(&mut self.filter, Filter::Concluidas, "Concluídas");
-            ui.menu_button("⇅ Calendário", |ui| self.ics_menu(ui, store));
+            ui.menu_button("⇅ Importar / exportar", |ui| self.ics_menu(ui, store));
         });
         if let Some(m) = &self.msg {
             ui.weak(m);
@@ -102,7 +104,7 @@ impl TasksView {
             .iter()
             .enumerate()
             .filter(|(_, t)| match self.filter {
-                Filter::Hoje => t.date == Some(today),
+                Filter::Hoje => t.occurs_on(today),
                 Filter::Pendentes => !t.done,
                 Filter::Todas => true,
                 Filter::Concluidas => t.done,
@@ -116,14 +118,40 @@ impl TasksView {
         });
 
         let mut dirty = false;
+        let mut delete = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             if idx.is_empty() {
                 ui.weak("Nada por aqui.");
             }
             for i in idx {
                 let t = &mut store.tasks[i];
-                ui.horizontal(|ui| {
+                // A linha inteira é clicável; os controles dentro dela (caixa, texto) têm prioridade.
+                let row = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 28.0));
+                let resp = ui.interact(row, ui.scope_id().with(("linha", t.id)), egui::Sense::click());
+                let selected = self.selected == Some(t.id);
+                if selected || resp.hovered() {
+                    let a = if selected { 0.22 } else { 0.10 };
+                    ui.painter().rect_filled(row, 7.0, ACCENT.gamma_multiply(a));
+                }
+                if resp.clicked() {
+                    self.selected = Some(t.id);
+                }
+                let id = t.id;
+                resp.context_menu(|ui| {
+                    if ui.button("Editar").clicked() {
+                        self.selected = Some(id);
+                        ui.close();
+                    }
+                    if ui.button("Excluir").clicked() {
+                        delete = Some(id);
+                        ui.close();
+                    }
+                });
+                let layout = egui::Layout::left_to_right(egui::Align::Center);
+                ui.scope_builder(egui::UiBuilder::new().max_rect(row).layout(layout), |ui| {
+                    ui.set_min_height(28.0);
                     if ui.checkbox(&mut t.done, "").changed() {
+                        t.roll_over();
                         dirty = true;
                     }
                     let [r, g, b] = t.color;
@@ -133,9 +161,7 @@ impl TasksView {
                     if t.done {
                         title = title.strikethrough().weak();
                     }
-                    if ui.selectable_label(self.selected == Some(t.id), title).clicked() {
-                        self.selected = Some(t.id);
-                    }
+                    ui.add(egui::Label::new(title).selectable(false));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let mut info = String::new();
                         if let Some(h) = t.time {
@@ -156,6 +182,13 @@ impl TasksView {
             }
         });
         store.dirty |= dirty;
+        if let Some(id) = delete {
+            store.remove(id);
+            if self.selected == Some(id) {
+                self.selected = None;
+                self.buf_for = None;
+            }
+        }
     }
 
     fn ics_menu(&mut self, ui: &mut egui::Ui, store: &mut Store) {
@@ -212,7 +245,10 @@ impl TasksView {
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.horizontal(|ui| {
-                changed |= ui.checkbox(&mut t.done, "").changed();
+                if ui.checkbox(&mut t.done, "").changed() {
+                    t.roll_over();
+                    changed = true;
+                }
                 changed |= ui
                     .add(
                         egui::TextEdit::singleline(&mut t.title)
@@ -221,7 +257,7 @@ impl TasksView {
                     )
                     .changed();
                 changed |= ui.color_edit_button_srgb(&mut t.color).changed();
-                if ui.button("🗑").on_hover_text("Excluir tarefa").clicked() {
+                if chrome::icon_button(ui, Glyph::Trash, 0.0).on_hover_text("Excluir tarefa").clicked() {
                     delete = true;
                 }
             });
@@ -239,10 +275,12 @@ impl TasksView {
                 );
                 if r.changed() && (parsed.is_some() || self.date_buf.trim().is_empty()) {
                     t.date = parsed;
+                    t.set_anchor();
                     changed = true;
                 }
                 if ui.small_button("Hoje").clicked() {
                     t.date = Some(today);
+                    t.set_anchor();
                     self.date_buf = today.format("%d/%m/%Y").to_string();
                     changed = true;
                 }
@@ -281,6 +319,27 @@ impl TasksView {
                 });
                 if t.notify.is_some() && (t.date.is_none() || t.time.is_none()) {
                     ui.weak("defina data e hora");
+                }
+            });
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label("Repetir");
+                egui::ComboBox::from_id_salt("repeat").selected_text(t.repeat.label()).show_ui(ui, |ui| {
+                    for r in Repeat::ALL {
+                        if ui.selectable_value(&mut t.repeat, r, r.label()).changed() {
+                            t.set_anchor();
+                            changed = true;
+                        }
+                    }
+                });
+                if t.repeat != Repeat::None {
+                    ui.label("a cada");
+                    changed |= ui.add(egui::DragValue::new(&mut t.every).range(1..=365)).changed();
+                    ui.label(t.repeat.unit(t.every));
+                    if t.date.is_none() {
+                        ui.weak("defina a data");
+                    }
                 }
             });
 

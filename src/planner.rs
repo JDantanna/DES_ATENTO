@@ -123,7 +123,7 @@ impl Planner {
             .tasks
             .iter()
             .enumerate()
-            .filter(|(_, t)| t.date == Some(d) && (self.show_done || !t.done))
+            .filter(|(_, t)| t.occurs_on(d) && (self.show_done || !t.done))
             .map(|(i, _)| i)
             .collect();
         v.sort_by_key(|&i| (store.tasks[i].done, store.tasks[i].time, store.tasks[i].id));

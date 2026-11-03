@@ -29,6 +29,12 @@ pub fn apply(ctx: &egui::Context) {
         v.widgets.inactive.weak_bg_fill = Color32::from_rgb(30, 34, 48);
         v.widgets.hovered.weak_bg_fill = Color32::from_rgb(42, 48, 68);
         v.widgets.noninteractive.bg_stroke.color = Color32::from_white_alpha(14);
+        // Sem crescer no hover: os botões ficam parados dentro do próprio quadro.
+        let stroke_w = v.widgets.inactive.bg_stroke.width;
+        for w in [&mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+            w.expansion = 0.0;
+            w.bg_stroke.width = stroke_w;
+        }
         s.spacing.item_spacing = vec2(8.0, 7.0);
         s.spacing.button_padding = vec2(10.0, 5.0);
     });

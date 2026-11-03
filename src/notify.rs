@@ -28,7 +28,7 @@ $t::CreateToastNotifier($app).Show($toast)
 
 #[cfg(windows)]
 pub fn toast(title: &str, body: &str) {
-    crate::sound::hey_listen();
+    crate::sound::play(crate::sound::Sound::HeyListen);
     use std::os::windows::process::CommandExt;
     let _ = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", TOAST])
@@ -41,9 +41,15 @@ pub fn toast(title: &str, body: &str) {
 pub fn start() {
     std::thread::spawn(|| {
         let mut fired: HashSet<(u64, i64)> = HashSet::new();
+        let mut store = Store::load();
+        let mut stamp = Store::modified();
         loop {
             let now = Local::now().naive_local();
-            let store = Store::load();
+            // Só relê o arquivo quando o app salvou algo novo.
+            if Store::modified() != stamp {
+                stamp = Store::modified();
+                store = Store::load();
+            }
             for t in store.tasks.iter().filter(|t| !t.done) {
                 let (Some(date), Some(time), Some(min)) = (t.date, t.time, t.notify) else {
                     continue;

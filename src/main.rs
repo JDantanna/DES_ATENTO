@@ -29,7 +29,7 @@ use updater::{State, Updater};
 #[derive(PartialEq, Clone, Copy)]
 enum Tab {
     Tarefas,
-    Planejamento,
+    Calendario,
     Coach,
 }
 
@@ -73,11 +73,12 @@ impl App {
         let ctx = ui.ctx().clone();
         ui.weak(format!("v{}", updater::VERSION));
         match self.updater.state() {
-            State::Checking => {
-                ui.weak("Verificando...");
-            }
-            State::Downloading => {
-                ui.weak("Baixando atualização...");
+            State::Checking | State::Downloading => {
+                // O ícone gira enquanto trabalha.
+                let spin = ui.input(|i| i.time) as f32 * 5.0;
+                chrome::icon_button(ui, chrome::Glyph::Refresh, spin);
+                ui.weak(if matches!(self.updater.state(), State::Checking) { "Verificando..." } else { "Baixando atualização..." });
+                ctx.request_repaint();
             }
             State::Available { version, url } => {
                 if ui.button(format!("Atualizar para v{version}")).clicked() {
@@ -85,7 +86,7 @@ impl App {
                 }
             }
             st => {
-                if ui.add(egui::Button::new("Buscar atualizações").frame(false)).clicked() {
+                if chrome::icon_button(ui, chrome::Glyph::Refresh, 0.0).on_hover_text("Buscar atualizações").clicked() {
                     self.updater.check(ctx);
                 }
                 match st {
@@ -118,7 +119,7 @@ impl App {
                 ui.image((self.logo.id(), vec2(24.0, 24.0)));
                 ui.label(egui::RichText::new("Navi").strong().size(16.0));
                 ui.add_space(14.0);
-                for (tab, label) in [(Tab::Tarefas, "Tarefas"), (Tab::Planejamento, "Planejamento"), (Tab::Coach, "Coach")] {
+                for (tab, label) in [(Tab::Tarefas, "Tarefas"), (Tab::Calendario, "Calendário"), (Tab::Coach, "Coach")] {
                     let sel = self.tab == tab;
                     let text = egui::RichText::new(label).size(14.5).color(if sel { Color32::WHITE } else { Color32::from_gray(160) });
                     let fill = if sel { ACCENT.gamma_multiply(0.22) } else { Color32::TRANSPARENT };
@@ -172,7 +173,7 @@ impl eframe::App for App {
 
         match self.tab {
             Tab::Tarefas => self.tasks.show(ui, &mut self.store),
-            Tab::Planejamento => {
+            Tab::Calendario => {
                 if let Some(id) = self.planner.show(ui, &mut self.store) {
                     self.tasks.open(id);
                     self.tab = Tab::Tarefas;
