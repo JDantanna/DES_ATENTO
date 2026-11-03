@@ -47,11 +47,14 @@ struct App {
     tray: Option<tray::Tray>,
     ask_minimize: bool,
     settings: Settings,
+    scale_dirty: bool,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
+        let settings = Settings::load();
+        cc.egui_ctx.set_zoom_factor(settings.scale);
         notify::start();
         let store = Store::load();
         let today = store.today_titles(Local::now().date_naive());
@@ -72,7 +75,8 @@ impl App {
             logo,
             tray: None,
             ask_minimize: false,
-            settings: Settings::load(),
+            settings,
+            scale_dirty: false,
         }
     }
 
@@ -117,6 +121,71 @@ impl App {
         if self.tray.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         }
+    }
+
+    /// Traz a janela principal de volta (da bandeja ou da barra de tarefas) e a põe em foco.
+    fn restore(&mut self, ctx: &egui::Context) {
+        if self.tray.take().is_some() {
+            tray::leave();
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    /// Mantém a escala dentro dos limites e a grava quando muda (menu, Ctrl +/-).
+    fn sync_scale(&mut self, ctx: &egui::Context) {
+        let z = ctx.zoom_factor();
+        let clamped = z.clamp(*model::SCALE_RANGE.start(), *model::SCALE_RANGE.end());
+        if (clamped - z).abs() > 1e-3 {
+            ctx.set_zoom_factor(clamped);
+        }
+        if (clamped - self.settings.scale).abs() > 1e-3 {
+            self.settings.scale = clamped;
+            self.scale_dirty = true;
+        }
+        if self.scale_dirty && !ctx.input(|i| i.pointer.any_down()) {
+            self.scale_dirty = false;
+            self.settings.save();
+        }
+    }
+
+    fn scale_menu(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        ui.menu_button("Aa", |ui| {
+            let z = ctx.zoom_factor();
+            ui.label("Tamanho da interface");
+            ui.horizontal(|ui| {
+                let set = |v: f32| ctx.set_zoom_factor(((v * 20.0).round() / 20.0).clamp(*model::SCALE_RANGE.start(), *model::SCALE_RANGE.end()));
+                if ui.button("−").clicked() {
+                    set(z - 0.1);
+                }
+                ui.label(format!("{:.0}%", z * 100.0));
+                if ui.button("+").clicked() {
+                    set(z + 0.1);
+                }
+                if ui.button("100%").clicked() {
+                    set(1.0);
+                }
+            });
+            ui.weak("Atalhos: Ctrl + / Ctrl − / Ctrl 0");
+        })
+        .response
+        .on_hover_text("Tamanho da interface");
+    }
+
+    /// A logo balança quando o mouse passa por cima.
+    fn logo_ui(&self, ui: &mut egui::Ui) {
+        let size = vec2(24.0, 24.0);
+        let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+        let amp = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.2);
+        let t = ui.input(|i| i.time) as f32;
+        if amp > 0.0 {
+            ui.ctx().request_repaint();
+        }
+        let lift = (t * 9.0).sin().abs() * 3.0 * amp;
+        egui::Image::new((self.logo.id(), size))
+            .rotate((t * 12.0).sin() * 0.35 * amp, vec2(0.5, 0.5))
+            .paint_at(ui, rect.translate(vec2(0.0, -lift)));
     }
 
     /// Aplica a escolha de minimizar (bandeja ou só minimizar).
@@ -172,7 +241,7 @@ impl App {
             }
             ui.horizontal_centered(|ui| {
                 ui.add_space(14.0);
-                ui.image((self.logo.id(), vec2(24.0, 24.0)));
+                self.logo_ui(ui);
                 ui.label(egui::RichText::new("Navi").strong().size(16.0));
                 ui.add_space(14.0);
                 for (tab, label) in [(Tab::Tarefas, "Tarefas"), (Tab::Calendario, "Calendário"), (Tab::Coach, "Coach")] {
@@ -203,6 +272,8 @@ impl App {
                         self.ask_minimize = true;
                     }
                     ui.add_space(8.0);
+                    self.scale_menu(ui);
+                    ui.add_space(4.0);
                     self.update_ui(ui);
                 });
             });
@@ -216,6 +287,7 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.sync_scale(ui.ctx());
         let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
         let radius = if maximized { 0.0 } else { chrome::RADIUS };
         let full = ui.max_rect();
@@ -233,10 +305,7 @@ impl eframe::App for App {
         }
 
         match tray::take_request() {
-            Some(tray::Request::Restore) => {
-                tray::leave();
-                self.tray = None;
-            }
+            Some(tray::Request::Restore) => self.restore(ui.ctx()),
             Some(tray::Request::Quit) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
             None => {}
         }
@@ -253,11 +322,17 @@ impl eframe::App for App {
             }
             Tab::Coach => self.coach.show(ui, &self.tracker),
         }
+        if self.tab != Tab::Calendario {
+            self.planner.cancel_drag();
+        }
 
         self.coach.floating(ui, &self.tracker);
         if self.coach.take_opened() {
             let ctx = ui.ctx().clone();
             self.go_tray(&ctx);
+        }
+        if self.coach.take_open_app() {
+            self.restore(ui.ctx());
         }
         if self.ask_minimize {
             let ctx = ui.ctx().clone();

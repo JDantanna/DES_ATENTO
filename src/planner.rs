@@ -1,7 +1,7 @@
 use chrono::{Datelike, Duration, Local, Months, NaiveDate};
 use eframe::egui::{self, Align2, Color32, FontId, Sense, vec2};
 
-use crate::model::Store;
+use crate::model::{Store, tag_rgb};
 use crate::splash::MESES;
 use crate::theme::ACCENT;
 
@@ -20,6 +20,8 @@ pub struct Planner {
     week_starts_sunday: bool,
     show_done: bool,
     new_title: String,
+    /// Tarefa sendo arrastada e o dia de onde saiu.
+    drag: Option<(u64, NaiveDate)>,
 }
 
 impl Planner {
@@ -30,6 +32,7 @@ impl Planner {
             week_starts_sunday: false,
             show_done: true,
             new_title: String::new(),
+            drag: None,
         }
     }
 
@@ -130,7 +133,7 @@ impl Planner {
         v
     }
 
-    fn month(&mut self, ui: &mut egui::Ui, store: &Store) -> Option<u64> {
+    fn month(&mut self, ui: &mut egui::Ui, store: &mut Store) -> Option<u64> {
         let first = self.anchor.with_day(1).unwrap();
         let next = first.checked_add_months(Months::new(1)).unwrap();
         let days = (next - first).num_days();
@@ -154,6 +157,7 @@ impl Planner {
 
         let mut open = None;
         let mut goto_day = None;
+        let mut cells = Vec::with_capacity(rows * 7);
         for row in 0..rows {
             for col in 0..7 {
                 let d = grid_start + Duration::days((row * 7 + col) as i64);
@@ -162,6 +166,7 @@ impl Planner {
                     vec2(cell_w, cell_h),
                 )
                 .shrink(1.5);
+                cells.push((rect, d));
                 let in_month = d.month() == first.month();
                 let bg = if d == today {
                     ACCENT.gamma_multiply(0.18)
@@ -203,8 +208,16 @@ impl Planner {
                     );
                     let [r, g, b] = t.color;
                     let base = Color32::from_rgb(r, g, b);
-                    let r = ui.interact(chip, ui.scope_id().with(("chip", t.id)), Sense::click());
-                    let fill = if t.done { Color32::from_gray(50) } else { base.gamma_multiply(if r.hovered() { 0.7 } else { 0.45 }) };
+                    let r = ui.interact(chip, ui.scope_id().with(("chip", t.id, d)), Sense::click_and_drag());
+                    if r.drag_started() {
+                        self.drag = Some((t.id, d));
+                    }
+                    let lifted = self.drag.is_some_and(|(id, from)| id == t.id && from == d);
+                    let fill = if t.done || lifted {
+                        Color32::from_gray(50)
+                    } else {
+                        base.gamma_multiply(if r.hovered() { 0.7 } else { 0.45 })
+                    };
                     painter.rect_filled(chip, 3.0, fill);
                     let label = match t.time {
                         Some(h) => format!("{} {}", h.format("%H:%M"), t.title),
@@ -232,6 +245,7 @@ impl Planner {
                 }
             }
         }
+        self.finish_drag(ui, store, &cells);
         if let Some(d) = goto_day {
             self.anchor = d;
             self.mode = Mode::Dia;
@@ -244,20 +258,63 @@ impl Planner {
         let today = Local::now().date_naive();
         let mut open = None;
         let mut dirty = false;
+        let mut cells = Vec::with_capacity(7);
         ui.columns(7, |cols| {
             for (c, col) in cols.iter_mut().enumerate() {
                 let d = start + Duration::days(c as i64);
+                cells.push((col.max_rect(), d));
                 let name = DIAS_CURTOS[d.weekday().num_days_from_monday() as usize];
                 let head = egui::RichText::new(format!("{name} {}", d.day())).strong();
                 col.label(if d == today { head.color(ACCENT) } else { head });
                 col.separator();
                 egui::ScrollArea::vertical().id_salt(("semana", c)).show(col, |ui| {
-                    self.cards(ui, store, d, &mut open, &mut dirty);
+                    self.cards(ui, store, d, true, &mut open, &mut dirty);
                 });
             }
         });
         store.dirty |= dirty;
+        self.finish_drag(ui, store, &cells);
         open
+    }
+
+    /// Acompanha o arrasto de uma tarefa: mostra o que está sendo levado, destaca o dia sob o mouse
+    /// e, ao soltar, muda a data (uma tarefa recorrente leva a série inteira junto).
+    fn finish_drag(&mut self, ui: &egui::Ui, store: &mut Store, cells: &[(egui::Rect, NaiveDate)]) {
+        let Some((id, from)) = self.drag else { return };
+        let ctx = ui.ctx();
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.drag = None;
+            return;
+        }
+        let pos = ctx.pointer_latest_pos();
+        let target = pos.and_then(|p| cells.iter().find(|(r, _)| r.contains(p)).copied());
+        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        if let Some((r, _)) = target {
+            ui.painter().rect_stroke(r.shrink(1.0), 4.0, egui::Stroke::new(2.0, ACCENT), egui::StrokeKind::Inside);
+        }
+        if let (Some(p), Some(t)) = (pos, store.tasks.iter().find(|t| t.id == id)) {
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, ui.scope_id().with("navi_drag")));
+            let galley = painter.layout_no_wrap(t.title.clone(), FontId::proportional(12.0), Color32::WHITE);
+            let [r, g, b] = t.color;
+            let rect = egui::Rect::from_min_size(p + vec2(12.0, 8.0), galley.size() + vec2(14.0, 8.0));
+            painter.rect_filled(rect, 4.0, Color32::from_rgb(r, g, b).gamma_multiply(0.9));
+            painter.galley(rect.min + vec2(7.0, 4.0), galley, Color32::WHITE);
+        }
+        if !ctx.input(|i| i.pointer.any_down()) {
+            self.drag = None;
+            if let Some((_, to)) = target.filter(|(_, to)| *to != from) {
+                if let Some(t) = store.tasks.iter_mut().find(|t| t.id == id) {
+                    t.date = t.date.map(|d| d + (to - from));
+                    t.set_anchor();
+                    store.dirty = true;
+                }
+            }
+        }
+    }
+
+    /// Cancela um arrasto em andamento (ao sair da aba).
+    pub fn cancel_drag(&mut self) {
+        self.drag = None;
     }
 
     fn day(&mut self, ui: &mut egui::Ui, store: &mut Store) -> Option<u64> {
@@ -282,13 +339,15 @@ impl Planner {
             if self.tasks_on(store, d).is_empty() {
                 ui.weak("Nenhuma tarefa neste dia.");
             }
-            self.cards(ui, store, d, &mut open, &mut dirty);
+            self.cards(ui, store, d, false, &mut open, &mut dirty);
         });
         store.dirty |= dirty;
         open
     }
 
-    fn cards(&self, ui: &mut egui::Ui, store: &mut Store, d: NaiveDate, open: &mut Option<u64>, dirty: &mut bool) {
+    /// Cartões das tarefas de um dia; com `can_drag`, o título deles pode ser arrastado para outro dia.
+    fn cards(&mut self, ui: &mut egui::Ui, store: &mut Store, d: NaiveDate, can_drag: bool, open: &mut Option<u64>, dirty: &mut bool) {
+        let colors = &store.tag_colors;
         for i in self.tasks_on(store, d) {
             let t = &mut store.tasks[i];
             let [r, g, b] = t.color;
@@ -304,7 +363,13 @@ impl Planner {
                         if t.done {
                             text = text.strikethrough().weak();
                         }
-                        if ui.link(text).clicked() {
+                        let sense = if can_drag { Sense::click_and_drag() } else { Sense::click() };
+                        let title = ui.add(egui::Label::new(text).selectable(false).sense(sense));
+                        let title = title.on_hover_cursor(if can_drag { egui::CursorIcon::Grab } else { egui::CursorIcon::PointingHand });
+                        if title.drag_started() {
+                            self.drag = Some((t.id, d));
+                        }
+                        if title.clicked() {
                             *open = Some(t.id);
                         }
                     });
@@ -316,11 +381,16 @@ impl Planner {
                     if total > 0 {
                         meta.push_str(&format!("  {ok}/{total}"));
                     }
-                    for tag in &t.tags {
-                        meta.push_str(&format!("  #{tag}"));
-                    }
-                    if !meta.is_empty() {
-                        ui.weak(meta.trim());
+                    if !meta.is_empty() || !t.tags.is_empty() {
+                        ui.horizontal_wrapped(|ui| {
+                            if !meta.is_empty() {
+                                ui.weak(meta.trim());
+                            }
+                            for tag in &t.tags {
+                                let [r, g, b] = tag_rgb(colors, tag);
+                                ui.label(egui::RichText::new(format!("#{tag}")).small().color(Color32::from_rgb(r, g, b)));
+                            }
+                        });
                     }
                 });
             ui.add_space(3.0);

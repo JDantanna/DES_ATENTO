@@ -34,8 +34,12 @@ pub struct CoachView {
     widget_list: bool,
     /// Altura atual da janela do widget (o redimensionamento só é pedido quando ela muda).
     widget_h: f32,
+    /// Zoom da interface quando a janela do widget foi dimensionada pela última vez.
+    widget_zoom: f32,
     /// O widget acabou de ser aberto (o app principal vai para a bandeja).
     just_opened: bool,
+    /// Duplo clique no widget: abrir o app principal.
+    open_app: bool,
     /// Texturas dos ícones, por caminho do executável.
     icons: HashMap<String, egui::TextureHandle>,
 }
@@ -99,11 +103,24 @@ pub fn fmt_long(secs: u64, with_secs: bool) -> String {
 
 impl CoachView {
     pub fn new() -> Self {
-        Self { range: Range::Hoje, widget: false, widget_list: false, widget_h: 0.0, just_opened: false, icons: HashMap::new() }
+        Self {
+            range: Range::Hoje,
+            widget: false,
+            widget_list: false,
+            widget_h: 0.0,
+            widget_zoom: 1.0,
+            just_opened: false,
+            open_app: false,
+            icons: HashMap::new(),
+        }
     }
 
     pub fn take_opened(&mut self) -> bool {
         std::mem::take(&mut self.just_opened)
+    }
+
+    pub fn take_open_app(&mut self) -> bool {
+        std::mem::take(&mut self.open_app)
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, tracker: &Tracker) {
@@ -183,11 +200,17 @@ impl CoachView {
         let height = if self.widget_list { 176.0 + data.session.len().min(7) as f32 * 26.0 + 8.0 } else { 150.0 };
 
         let id = egui::ViewportId::from_hash_of(WIDGET_ID);
-        // Só pede novo tamanho quando ele muda: um comando a cada quadro mantém a janela repintando sem parar.
-        if self.widget_h != 0.0 && (self.widget_h - height).abs() > f32::EPSILON {
+        // Só pede novo tamanho quando ele ou a escala muda: um comando a cada quadro mantém a janela repintando sem parar.
+        let zoom = ctx.zoom_factor();
+        let first = self.widget_h == 0.0;
+        if (!first && (self.widget_h - height).abs() > f32::EPSILON) || (zoom - self.widget_zoom).abs() > 1e-3 {
             ctx.send_viewport_cmd_to(id, egui::ViewportCommand::InnerSize(vec2(WIDGET_W, height)));
         }
         self.widget_h = height;
+        // No primeiro quadro a janela ainda não existe; o comando só vale a partir do próximo.
+        if !first {
+            self.widget_zoom = zoom;
+        }
 
         let builder = egui::ViewportBuilder::default()
             .with_title("Navi · Coach")
@@ -198,15 +221,26 @@ impl CoachView {
             .with_resizable(false);
         let mut close = false;
         let mut toggle_list = false;
+        let mut open_app = false;
         let open = self.widget_list;
+        // Sem nada sendo rastreado (ocioso ou sem programa), o widget fica vermelho.
+        let tracking = !data.now.idle && data.now.current.is_some();
+        let (fill, stroke, time_color) = if tracking {
+            (BG, Color32::from_white_alpha(22), ACCENT)
+        } else {
+            (Color32::from_rgb(58, 20, 24), Color32::from_rgb(214, 70, 70), Color32::from_rgb(255, 120, 120))
+        };
         ctx.show_viewport_immediate(id, builder, |ui, _class| {
             let full = ui.max_rect();
-            ui.painter().rect_filled(full, 14.0, BG);
-            ui.painter().rect_stroke(full, 14.0, egui::Stroke::new(1.0, Color32::from_white_alpha(22)), egui::StrokeKind::Inside);
+            ui.painter().rect_filled(full, 14.0, fill);
+            ui.painter().rect_stroke(full, 14.0, egui::Stroke::new(if tracking { 1.0 } else { 1.5 }, stroke), egui::StrokeKind::Inside);
 
             let drag = ui.interact(full, ui.scope_id().with("widget_drag"), Sense::click_and_drag());
             if drag.drag_started() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+            if drag.double_clicked() {
+                open_app = true;
             }
             egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(14)).show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -220,7 +254,7 @@ impl CoachView {
                         }
                     });
                 });
-                ui.label(egui::RichText::new(fmt_long(data.app_secs, true)).size(19.0).color(ACCENT));
+                ui.label(egui::RichText::new(fmt_long(data.app_secs, true)).size(19.0).color(time_color));
                 ui.weak(format!("Hoje, no total: {}", fmt_long(data.total, false)));
                 ui.add_space(2.0);
                 let label = format!("{} Programas desta sessão ({})", if open { "–" } else { "+" }, data.session.len());
@@ -248,6 +282,7 @@ impl CoachView {
         if toggle_list {
             self.widget_list = !self.widget_list;
         }
+        self.open_app |= open_app;
         if close {
             self.widget = false;
         }
@@ -301,6 +336,8 @@ fn fairy_button(ui: &mut egui::Ui, active: bool) -> bool {
         ui.ctx().request_repaint();
     }
     let glow = if active { 1.0 } else { amp };
-    crate::fairy::draw(ui.painter(), rect.center() + vec2(0.0, 2.0 - amp * (time * 11.0).sin().abs() * 2.0), 40.0, flap, glow);
+    // Em hover ela voa em oito, subindo e descendo, enquanto bate as asas.
+    let sway = vec2((time * 5.0).sin() * 5.0, (time * 10.0).sin() * 4.0) * amp;
+    crate::fairy::draw(ui.painter(), rect.center() + vec2(0.0, 2.0) + sway, 40.0 + 6.0 * amp, flap, glow);
     resp.on_hover_text(if active { "Fechar widget" } else { "Abrir widget" }).clicked()
 }

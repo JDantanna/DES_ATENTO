@@ -1,10 +1,20 @@
+use std::collections::HashMap;
+
 use chrono::{Local, NaiveDate, NaiveTime};
 use eframe::egui::{self, Color32, RichText};
 
 use crate::ics;
 use crate::chrome::{self, Glyph};
-use crate::model::{Repeat, Store, Subtask, Task};
+use crate::model::{Repeat, Store, Subtask, Task, tag_rgb};
 use crate::theme::ACCENT;
+
+/// Etiqueta colorida de uma tag; `on` a destaca (filtro ativo).
+fn tag_chip(ui: &mut egui::Ui, tag: &str, rgb: [u8; 3], on: bool, suffix: &str) -> egui::Response {
+    let c = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+    let text = RichText::new(format!("#{tag}{suffix}")).color(Color32::WHITE);
+    let fill = c.gamma_multiply(if on { 0.75 } else { 0.28 });
+    ui.add(egui::Button::new(text).fill(fill).stroke(egui::Stroke::new(1.0, c.gamma_multiply(0.85))).corner_radius(10))
+}
 
 #[derive(PartialEq, Clone, Copy)]
 enum Filter {
@@ -25,6 +35,9 @@ pub struct TasksView {
     sub_buf: String,
     buf_for: Option<u64>,
     msg: Option<String>,
+    tags_open: bool,
+    /// Texto em edição de cada tag no painel de tags.
+    tag_edit: HashMap<String, String>,
 }
 
 impl TasksView {
@@ -40,6 +53,8 @@ impl TasksView {
             sub_buf: String::new(),
             buf_for: None,
             msg: None,
+            tags_open: false,
+            tag_edit: HashMap::new(),
         }
     }
 
@@ -61,6 +76,64 @@ impl TasksView {
             egui::CentralPanel::default().show(ui, |ui| self.editor(ui, store));
         } else {
             egui::CentralPanel::default().show(ui, |ui| self.list(ui, store));
+        }
+        self.tags_window(ui.ctx(), store);
+    }
+
+    /// Painel para trocar a cor, renomear ou remover as tags.
+    fn tags_window(&mut self, ctx: &egui::Context, store: &mut Store) {
+        if !self.tags_open {
+            return;
+        }
+        let tags = store.all_tags();
+        self.tag_edit.retain(|k, _| tags.contains(k));
+        let (mut recolor, mut rename, mut delete) = (None, None, None);
+        let mut open = true;
+        egui::Window::new("Tags").open(&mut open).collapsible(false).default_width(360.0).show(ctx, |ui| {
+            if tags.is_empty() {
+                ui.weak("Nenhuma tag ainda. Crie tags no editor de uma tarefa.");
+            }
+            egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
+                for tag in &tags {
+                    ui.horizontal(|ui| {
+                        let mut rgb = tag_rgb(&store.tag_colors, tag);
+                        if ui.color_edit_button_srgb(&mut rgb).changed() {
+                            recolor = Some((tag.clone(), rgb));
+                        }
+                        let buf = self.tag_edit.entry(tag.clone()).or_insert_with(|| tag.clone());
+                        let r = ui.add(egui::TextEdit::singleline(buf).desired_width(150.0));
+                        if r.lost_focus() {
+                            if ui.input(|i| i.key_pressed(egui::Key::Escape)) || buf.trim().is_empty() {
+                                *buf = tag.clone();
+                            } else if buf.trim() != tag.as_str() {
+                                rename = Some((tag.clone(), buf.clone()));
+                            }
+                        }
+                        ui.weak(format!("{} tarefas", store.tag_count(tag)));
+                        if chrome::icon_button(ui, Glyph::Trash, 0.0).on_hover_text("Remover de todas as tarefas").clicked() {
+                            delete = Some(tag.clone());
+                        }
+                    });
+                }
+            });
+        });
+        self.tags_open = open;
+        if let Some((tag, rgb)) = recolor {
+            store.set_tag_color(&tag, rgb);
+        }
+        if let Some((from, to)) = rename {
+            store.rename_tag(&from, &to);
+            self.tag_edit.remove(&from);
+            if self.tag_filter.as_ref() == Some(&from) {
+                self.tag_filter = Some(to.trim().trim_start_matches('#').trim().to_owned());
+            }
+        }
+        if let Some(tag) = delete {
+            store.delete_tag(&tag);
+            self.tag_edit.remove(&tag);
+            if self.tag_filter.as_ref() == Some(&tag) {
+                self.tag_filter = None;
+            }
         }
     }
 
@@ -87,6 +160,9 @@ impl TasksView {
             ui.selectable_value(&mut self.filter, Filter::Pendentes, "Pendentes");
             ui.selectable_value(&mut self.filter, Filter::Todas, "Todas");
             ui.selectable_value(&mut self.filter, Filter::Concluidas, "Concluídas");
+            if ui.selectable_label(self.tags_open, "Tags").on_hover_text("Editar cores e nomes das tags").clicked() {
+                self.tags_open = !self.tags_open;
+            }
             ui.menu_button("Importar / exportar", |ui| self.ics_menu(ui, store));
         });
         if let Some(m) = &self.msg {
@@ -97,7 +173,7 @@ impl TasksView {
             ui.horizontal_wrapped(|ui| {
                 for t in &tags {
                     let on = self.tag_filter.as_ref() == Some(t);
-                    if ui.selectable_label(on, format!("#{t}")).clicked() {
+                    if tag_chip(ui, t, tag_rgb(&store.tag_colors, t), on, "").clicked() {
                         self.tag_filter = if on { None } else { Some(t.clone()) };
                     }
                 }
@@ -245,6 +321,8 @@ impl TasksView {
         let mut changed = false;
         let mut delete = false;
         let mut close = false;
+        let all_tags = store.all_tags();
+        let colors = &store.tag_colors;
         let t = &mut store.tasks[pos];
 
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -355,7 +433,7 @@ impl TasksView {
             ui.horizontal_wrapped(|ui| {
                 let mut rm = None;
                 for (i, tag) in t.tags.iter().enumerate() {
-                    if ui.small_button(format!("#{tag}  ×")).clicked() {
+                    if tag_chip(ui, tag, tag_rgb(colors, tag), true, "  ×").clicked() {
                         rm = Some(i);
                     }
                 }
@@ -374,6 +452,19 @@ impl TasksView {
                     r.request_focus();
                 }
             });
+            // Tags que já existem em outras tarefas, para reaproveitar com um clique.
+            let unused: Vec<&String> = all_tags.iter().filter(|g| !t.tags.contains(g)).collect();
+            if !unused.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.weak("Existentes:");
+                    for tag in unused {
+                        if tag_chip(ui, tag, tag_rgb(colors, tag), false, "").clicked() {
+                            t.tags.push(tag.clone());
+                            changed = true;
+                        }
+                    }
+                });
+            }
 
             ui.add_space(8.0);
             let (ok, total) = t.subtasks_done();

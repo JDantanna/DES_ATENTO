@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use chrono::{Datelike, Local, NaiveDate, NaiveTime};
@@ -168,10 +169,25 @@ impl Task {
     }
 }
 
+pub type TagColors = BTreeMap<String, [u8; 3]>;
+
+const TAG_PALETTE: [[u8; 3]; 8] =
+    [[110, 142, 251], [236, 112, 99], [88, 196, 141], [240, 178, 70], [176, 124, 230], [80, 190, 210], [230, 120, 170], [160, 170, 90]];
+
+/// Cor da tag: a escolhida pelo usuário ou, na falta dela, uma da paleta (sempre a mesma para o mesmo nome).
+pub fn tag_rgb(colors: &TagColors, tag: &str) -> [u8; 3] {
+    colors.get(tag).copied().unwrap_or_else(|| {
+        let h = tag.bytes().fold(7usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize));
+        TAG_PALETTE[h % TAG_PALETTE.len()]
+    })
+}
+
 #[derive(Serialize, Deserialize, Default)]
 pub struct Store {
     next_id: u64,
     pub tasks: Vec<Task>,
+    #[serde(default)]
+    pub tag_colors: TagColors,
     #[serde(skip)]
     pub dirty: bool,
 }
@@ -208,6 +224,43 @@ impl Store {
         v.sort_by_key(|t| t.to_lowercase());
         v.dedup();
         v
+    }
+
+    /// Quantas tarefas usam a tag.
+    pub fn tag_count(&self, tag: &str) -> usize {
+        self.tasks.iter().filter(|t| t.tags.iter().any(|x| x == tag)).count()
+    }
+
+    pub fn set_tag_color(&mut self, tag: &str, rgb: [u8; 3]) {
+        self.tag_colors.insert(tag.to_owned(), rgb);
+        self.dirty = true;
+    }
+
+    /// Renomeia a tag em todas as tarefas; se o novo nome já existe, as duas se juntam.
+    pub fn rename_tag(&mut self, from: &str, to: &str) {
+        let to = to.trim().trim_start_matches('#').trim();
+        if to.is_empty() || to == from {
+            return;
+        }
+        for t in &mut self.tasks {
+            if let Some(p) = t.tags.iter().position(|x| x == from) {
+                if t.tags.iter().any(|x| x == to) {
+                    t.tags.remove(p);
+                } else {
+                    t.tags[p] = to.to_owned();
+                }
+            }
+        }
+        let color = tag_rgb(&self.tag_colors, from);
+        self.tag_colors.remove(from);
+        self.tag_colors.entry(to.to_owned()).or_insert(color);
+        self.dirty = true;
+    }
+
+    pub fn delete_tag(&mut self, tag: &str) {
+        self.tasks.iter_mut().for_each(|t| t.tags.retain(|x| x != tag));
+        self.tag_colors.remove(tag);
+        self.dirty = true;
     }
 
     fn path() -> PathBuf {
@@ -276,6 +329,27 @@ mod tests {
     }
 
     #[test]
+    fn renomear_e_remover_tags() {
+        let mut s = Store::default();
+        let a = s.add("A".into(), None);
+        let b = s.add("B".into(), None);
+        s.tasks[0].tags = vec!["casa".into(), "casa2".into()];
+        s.tasks[1].tags = vec!["casa".into()];
+        s.set_tag_color("casa", [1, 2, 3]);
+        s.rename_tag("casa", "lar");
+        assert_eq!(s.tasks[0].tags, ["lar", "casa2"]);
+        assert_eq!(s.tag_colors.get("lar"), Some(&[1, 2, 3]));
+        assert!(!s.tag_colors.contains_key("casa"));
+        // Renomear para um nome que já existe junta as duas, sem duplicar.
+        s.rename_tag("casa2", "lar");
+        assert_eq!(s.tasks[0].tags, ["lar"]);
+        assert_eq!(s.tag_count("lar"), 2);
+        s.delete_tag("lar");
+        assert!(s.all_tags().is_empty());
+        let _ = (a, b);
+    }
+
+    #[test]
     fn proxima_data_volta_ao_30() {
         let t = rent();
         let feb = t.next_after(NaiveDate::from_ymd_opt(2026, 1, 30).unwrap());
@@ -285,11 +359,22 @@ mod tests {
 }
 
 /// Preferências do app (`settings.json`).
-#[derive(Serialize, Deserialize, Default, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy)]
+#[serde(default)]
 pub struct Settings {
     /// Escolha do botão de minimizar: `Some(true)` bandeja, `Some(false)` só minimizar, `None` perguntar.
     pub minimize_to_tray: Option<bool>,
+    /// Escala da interface (1.0 = 100%).
+    pub scale: f32,
 }
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self { minimize_to_tray: None, scale: 1.0 }
+    }
+}
+
+pub const SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.7..=2.0;
 
 impl Settings {
     fn path() -> PathBuf {
@@ -297,7 +382,10 @@ impl Settings {
     }
 
     pub fn load() -> Self {
-        std::fs::read_to_string(Self::path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+        let mut s: Self =
+            std::fs::read_to_string(Self::path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        s.scale = if s.scale.is_finite() { s.scale.clamp(*SCALE_RANGE.start(), *SCALE_RANGE.end()) } else { 1.0 };
+        s
     }
 
     pub fn save(&self) {
