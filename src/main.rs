@@ -19,7 +19,7 @@ mod updater;
 use chrono::Local;
 use coach::CoachView;
 use eframe::egui::{self, Color32, Sense, Stroke, vec2};
-use model::Store;
+use model::{Settings, Store};
 use planner::Planner;
 use splash::Splash;
 use tasks::TasksView;
@@ -46,6 +46,7 @@ struct App {
     logo: egui::TextureHandle,
     tray: Option<tray::Tray>,
     ask_minimize: bool,
+    settings: Settings,
 }
 
 impl App {
@@ -71,6 +72,7 @@ impl App {
             logo,
             tray: None,
             ask_minimize: false,
+            settings: Settings::load(),
         }
     }
 
@@ -83,7 +85,7 @@ impl App {
                 let spin = ui.input(|i| i.time) as f32 * 5.0;
                 chrome::icon_button(ui, chrome::Glyph::Refresh, spin);
                 ui.weak(if matches!(self.updater.state(), State::Checking) { "Verificando..." } else { "Baixando atualização..." });
-                ctx.request_repaint();
+                ctx.request_repaint_after(std::time::Duration::from_millis(33));
             }
             State::Available { version, url } => {
                 if ui.button(format!("Atualizar para v{version}")).clicked() {
@@ -117,6 +119,15 @@ impl App {
         }
     }
 
+    /// Aplica a escolha de minimizar (bandeja ou só minimizar).
+    fn minimize_to(&mut self, ctx: &egui::Context, to_tray: bool) {
+        if to_tray {
+            self.go_tray(ctx);
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
+    }
+
     fn minimize_dialog(&mut self, ctx: &egui::Context) {
         let mut choice = None;
         egui::Window::new("Minimizar o Navi")
@@ -125,6 +136,7 @@ impl App {
             .resizable(false)
             .show(ctx, |ui| {
                 ui.label("Para onde o Navi deve ir?");
+                ui.weak("Pergunto só desta vez. Clique com o botão direito no botão de minimizar para mudar.");
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui.button("Bandeja do sistema").clicked() {
@@ -140,11 +152,9 @@ impl App {
             });
         if let Some(to_tray) = choice {
             self.ask_minimize = false;
-            if to_tray {
-                self.go_tray(ctx);
-            } else {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-            }
+            self.settings.minimize_to_tray = Some(to_tray);
+            self.settings.save();
+            self.minimize_to(ctx, to_tray);
         }
     }
 
@@ -182,7 +192,14 @@ impl App {
                     if chrome::window_button(ui, g).clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
                     }
-                    if chrome::window_button(ui, chrome::Glyph::Minimize).clicked() {
+                    let min = chrome::window_button(ui, chrome::Glyph::Minimize).on_hover_text("Clique com o botão direito para escolher de novo");
+                    if min.clicked() {
+                        match self.settings.minimize_to_tray {
+                            Some(to_tray) => self.minimize_to(&ctx, to_tray),
+                            None => self.ask_minimize = true,
+                        }
+                    }
+                    if min.secondary_clicked() {
                         self.ask_minimize = true;
                     }
                     ui.add_space(8.0);

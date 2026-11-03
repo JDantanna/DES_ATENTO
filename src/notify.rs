@@ -14,30 +14,48 @@ use crate::model::Store;
 /// Janela em que um aviso ainda é disparado depois da hora (cobre suspensão/atrasos).
 const GRACE_MIN: i64 = 3;
 
+/// Identidade do app nas notificações: registra um AppUserModelID próprio ("Navi" + ícone),
+/// em vez de aparecer como "Windows PowerShell".
 const TOAST: &str = r#"
+$id = 'Navi.App'
+$k = "HKCU:\Software\Classes\AppUserModelId\$id"
+New-Item $k -Force | Out-Null
+New-ItemProperty $k -Name DisplayName -Value 'Navi' -Force | Out-Null
+New-ItemProperty $k -Name IconUri -Value $env:DA_ICON -Force | Out-Null
 $t = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
-$x = $t::GetTemplateContent('ToastText02')
+$x = $t::GetTemplateContent('ToastImageAndText02')
+$x.GetElementsByTagName('image').Item(0).SetAttribute('src', $env:DA_ICON)
 $n = $x.GetElementsByTagName('text')
 $n.Item(0).AppendChild($x.CreateTextNode($env:DA_TITLE)) | Out-Null
 $n.Item(1).AppendChild($x.CreateTextNode($env:DA_BODY)) | Out-Null
 $au = $x.CreateElement('audio'); $au.SetAttribute('silent','true'); $x.DocumentElement.AppendChild($au) | Out-Null
-$app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
 $toast = [Windows.UI.Notifications.ToastNotification, Windows.UI.Notifications, ContentType = WindowsRuntime]::new($x)
-$t::CreateToastNotifier($app).Show($toast)
+$t::CreateToastNotifier($id).Show($toast)
 "#;
+
+/// Grava o ícone do aviso em disco (o Windows só lê imagens de arquivo).
+fn icon_path() -> std::path::PathBuf {
+    let path = crate::model::data_dir().join("toast.png");
+    let bytes = include_bytes!("../assets/toast.png");
+    if std::fs::metadata(&path).map(|m| m.len() != bytes.len() as u64).unwrap_or(true) {
+        let _ = std::fs::create_dir_all(crate::model::data_dir());
+        let _ = std::fs::write(&path, bytes);
+    }
+    path
+}
 
 #[cfg(windows)]
 pub fn toast(title: &str, body: &str) {
-    crate::sound::notification();
     use std::os::windows::process::CommandExt;
+    crate::sound::notification();
     let _ = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", TOAST])
         .env("DA_TITLE", title)
         .env("DA_BODY", body)
+        .env("DA_ICON", icon_path())
         .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
         .spawn();
 }
-
 pub fn start() {
     std::thread::spawn(|| {
         let mut fired: HashSet<(u64, i64)> = HashSet::new();

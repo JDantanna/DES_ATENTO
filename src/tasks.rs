@@ -51,11 +51,17 @@ impl TasksView {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, store: &mut Store) {
-        egui::Panel::left("lista")
-            .resizable(true)
-            .default_size(340.0)
-            .show(ui, |ui| self.list(ui, store));
-        egui::CentralPanel::default().show(ui, |ui| self.editor(ui, store));
+        // O editor só existe enquanto há uma tarefa sendo criada ou editada; Esc fecha.
+        let editing = self.selected.is_some();
+        if editing && ui.input(|i| i.key_pressed(egui::Key::Escape)) && ui.memory(|m| m.focused().is_none()) {
+            self.selected = None;
+        }
+        if self.selected.is_some() {
+            egui::Panel::left("lista").resizable(true).default_size(340.0).show(ui, |ui| self.list(ui, store));
+            egui::CentralPanel::default().show(ui, |ui| self.editor(ui, store));
+        } else {
+            egui::CentralPanel::default().show(ui, |ui| self.list(ui, store));
+        }
     }
 
     fn list(&mut self, ui: &mut egui::Ui, store: &mut Store) {
@@ -81,7 +87,7 @@ impl TasksView {
             ui.selectable_value(&mut self.filter, Filter::Pendentes, "Pendentes");
             ui.selectable_value(&mut self.filter, Filter::Todas, "Todas");
             ui.selectable_value(&mut self.filter, Filter::Concluidas, "Concluídas");
-            ui.menu_button("⇅ Importar / exportar", |ui| self.ics_menu(ui, store));
+            ui.menu_button("Importar / exportar", |ui| self.ics_menu(ui, store));
         });
         if let Some(m) = &self.msg {
             ui.weak(m);
@@ -172,7 +178,7 @@ impl TasksView {
                         }
                         let (ok, total) = t.subtasks_done();
                         if total > 0 {
-                            info.push_str(&format!(" ☑{ok}/{total}"));
+                            info.push_str(&format!(" {ok}/{total}"));
                         }
                         if !info.is_empty() {
                             ui.weak(info.trim());
@@ -229,10 +235,7 @@ impl TasksView {
     }
 
     fn editor(&mut self, ui: &mut egui::Ui, store: &mut Store) {
-        let Some(id) = self.selected else {
-            ui.weak("Selecione ou crie uma tarefa.");
-            return;
-        };
+        let Some(id) = self.selected else { return };
         let Some(pos) = store.tasks.iter().position(|t| t.id == id) else {
             self.selected = None;
             return;
@@ -241,6 +244,7 @@ impl TasksView {
         let today = Local::now().date_naive();
         let mut changed = false;
         let mut delete = false;
+        let mut close = false;
         let t = &mut store.tasks[pos];
 
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -253,12 +257,15 @@ impl TasksView {
                     .add(
                         egui::TextEdit::singleline(&mut t.title)
                             .font(egui::TextStyle::Heading)
-                            .desired_width(ui.available_width() - 90.0),
+                            .desired_width(ui.available_width() - 130.0),
                     )
                     .changed();
                 changed |= ui.color_edit_button_srgb(&mut t.color).changed();
                 if chrome::icon_button(ui, Glyph::Trash, 0.0).on_hover_text("Excluir tarefa").clicked() {
                     delete = true;
+                }
+                if chrome::icon_button(ui, Glyph::Close, 0.0).on_hover_text("Fechar (Esc)").clicked() {
+                    close = true;
                 }
             });
             ui.add_space(8.0);
@@ -348,7 +355,7 @@ impl TasksView {
             ui.horizontal_wrapped(|ui| {
                 let mut rm = None;
                 for (i, tag) in t.tags.iter().enumerate() {
-                    if ui.small_button(format!("#{tag}  ✕")).clicked() {
+                    if ui.small_button(format!("#{tag}  ×")).clicked() {
                         rm = Some(i);
                     }
                 }
@@ -383,7 +390,7 @@ impl TasksView {
                     changed |= ui
                         .add(egui::TextEdit::singleline(&mut s.title).desired_width(ui.available_width() - 30.0))
                         .changed();
-                    if ui.small_button("✕").clicked() {
+                    if ui.small_button("×").clicked() {
                         rm = Some(i);
                     }
                 });
@@ -411,6 +418,9 @@ impl TasksView {
         });
 
         store.dirty |= changed;
+        if close {
+            self.selected = None;
+        }
         if delete {
             store.remove(id);
             self.selected = None;

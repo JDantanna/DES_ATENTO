@@ -1,9 +1,12 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use chrono::{Local, NaiveDate};
 use serde::{Deserialize, Serialize};
+
+use crate::appname;
 
 const IDLE_SECS: u32 = 300;
 const SAVE_EVERY: u32 = 30;
@@ -14,29 +17,76 @@ pub struct Usage {
     pub days: BTreeMap<String, BTreeMap<String, u64>>,
 }
 
-#[derive(Default)]
-pub struct Shared {
-    pub usage: Usage,
-    /// Segundos por programa desde que o app foi aberto.
-    pub session: BTreeMap<String, u64>,
-    pub current: Option<String>,
-    pub idle: bool,
-    pub icons: HashMap<String, Arc<Icon>>,
+impl Usage {
+    /// Nomes antigos de jogos ("Jogo-Win64-Shipping") viram o nome legível, juntando os tempos.
+    fn tidy(&mut self) {
+        for apps in self.days.values_mut() {
+            if !apps.keys().any(|k| k.contains("Shipping")) {
+                continue;
+            }
+            let mut fixed: BTreeMap<String, u64> = BTreeMap::new();
+            for (name, secs) in std::mem::take(apps) {
+                let name = if name.contains("Shipping") { appname::prettify(&name) } else { name };
+                *fixed.entry(name).or_default() += secs;
+            }
+            *apps = fixed;
+        }
+    }
 }
 
-/// Ícone RGBA do executável.
+/// Ícone RGBA do executável (`key` é o caminho do .exe, usado para cache de textura).
 pub struct Icon {
+    pub key: String,
     pub w: usize,
     pub h: usize,
     pub rgba: Vec<u8>,
 }
 
-pub struct Snapshot {
-    pub usage: Usage,
-    pub session: BTreeMap<String, u64>,
+#[derive(Default)]
+struct Shared {
+    usage: Usage,
+    /// Segundos por programa desde que o app foi aberto.
+    session: BTreeMap<String, u64>,
+    current: Option<String>,
+    idle: bool,
+    /// Ícones por caminho do executável, e de qual executável vem cada nome exibido.
+    icons: HashMap<String, Arc<Icon>>,
+    icon_of: HashMap<String, String>,
+}
+
+impl Shared {
+    fn icon(&self, name: &str) -> Option<Arc<Icon>> {
+        self.icon_of.get(name).and_then(|p| self.icons.get(p)).cloned()
+    }
+
+    fn row(&self, name: &str, secs: u64) -> AppRow {
+        AppRow { name: name.to_owned(), secs, icon: self.icon(name) }
+    }
+}
+
+pub struct AppRow {
+    pub name: String,
+    pub secs: u64,
+    pub icon: Option<Arc<Icon>>,
+}
+
+pub struct Now {
     pub current: Option<String>,
     pub idle: bool,
-    pub icons: HashMap<String, Arc<Icon>>,
+    pub icon: Option<Arc<Icon>>,
+}
+
+pub struct Report {
+    pub now: Now,
+    pub per_day: Vec<(NaiveDate, u64)>,
+    pub apps: Vec<AppRow>,
+}
+
+pub struct WidgetData {
+    pub now: Now,
+    pub app_secs: u64,
+    pub total: u64,
+    pub session: Vec<AppRow>,
 }
 
 #[derive(Clone)]
@@ -61,12 +111,15 @@ fn save(usage: &Usage) {
     }
 }
 
+fn day_key(d: NaiveDate) -> String {
+    d.format("%Y-%m-%d").to_string()
+}
+
 impl Tracker {
     pub fn start() -> Self {
-        let usage: Usage = std::fs::read_to_string(path())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let mut usage: Usage =
+            std::fs::read_to_string(path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        usage.tidy();
         let shared = Arc::new(Mutex::new(Shared { usage, ..Default::default() }));
         let worker = Arc::clone(&shared);
         std::thread::spawn(move || {
@@ -74,26 +127,33 @@ impl Tracker {
                 .ok()
                 .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
             let mut ticks = 0u32;
-            // Programas cujo ícone já foi buscado (com ou sem sucesso): a busca é feita uma vez só e fora do lock.
-            let mut icon_tried: std::collections::HashSet<String> = std::collections::HashSet::new();
+            // Caches só desta thread: consultar ícone e nome do produto é caro e feito uma vez por executável.
+            let mut icon_tried: HashSet<String> = HashSet::new();
+            let mut products: HashMap<String, Option<String>> = HashMap::new();
             loop {
                 std::thread::sleep(Duration::from_secs(1));
                 let idle = sys::idle_secs() >= IDLE_SECS;
                 let fg = if idle { None } else { sys::foreground() };
-                let app = fg.as_ref().map(|f| f.name.clone());
-                let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+                let name = fg.as_ref().map(|f| {
+                    let product = appname::needs_product(&f.exe)
+                        .then(|| products.entry(f.path.clone()).or_insert_with(|| appname::product_name(&f.path)).clone())
+                        .flatten();
+                    appname::display_name(&f.exe, &f.title, product.as_deref())
+                });
                 let new_icon = fg
                     .as_ref()
-                    .filter(|f| icon_tried.insert(f.name.clone()))
-                    .and_then(|f| sys::exe_icon(&f.path).map(|i| (f.name.clone(), Arc::new(i))));
+                    .filter(|f| icon_tried.insert(f.path.clone()))
+                    .and_then(|f| sys::exe_icon(&f.path).map(|i| (f.path.clone(), Arc::new(i))));
                 let mut s = worker.lock().unwrap();
                 s.icons.extend(new_icon);
                 s.idle = idle;
-                s.current = app;
-                if let Some(f) = fg.filter(|f| Some(&f.exe) != me.as_ref()) {
-                    let name = f.name;
-                    *s.session.entry(name.clone()).or_default() += 1;
-                    *s.usage.days.entry(day).or_default().entry(name).or_default() += 1;
+                s.current = name.clone();
+                if let (Some(f), Some(name)) = (fg, name) {
+                    s.icon_of.entry(name.clone()).or_insert_with(|| f.path.clone());
+                    if Some(&f.exe) != me.as_ref() {
+                        *s.session.entry(name.clone()).or_default() += 1;
+                        *s.usage.days.entry(day_key(Local::now().date_naive())).or_default().entry(name).or_default() += 1;
+                    }
                 }
                 ticks += 1;
                 if ticks % SAVE_EVERY == 0 {
@@ -110,18 +170,46 @@ impl Tracker {
         save(&self.shared.lock().unwrap().usage);
     }
 
-    /// Copia o estado atual para desenhar sem segurar o lock.
-    pub fn snapshot(&self) -> Snapshot {
+    fn now(s: &Shared) -> Now {
+        let current = s.current.clone();
+        let icon = current.as_deref().filter(|_| !s.idle).and_then(|c| s.icon(c));
+        Now { current, idle: s.idle, icon }
+    }
+
+    /// Relatório dos últimos `days` dias; só o que a tela mostra é copiado (nada do histórico inteiro).
+    pub fn report(&self, days: i64) -> Report {
         let s = self.shared.lock().unwrap();
-        Snapshot {
-            usage: s.usage.clone(),
-            session: s.session.clone(),
-            current: s.current.clone(),
-            idle: s.idle,
-            icons: s.icons.clone(),
+        let today = Local::now().date_naive();
+        let mut per_app: HashMap<&str, u64> = HashMap::new();
+        let mut per_day = Vec::with_capacity(days as usize);
+        for i in (0..days).rev() {
+            let d = today - chrono::Duration::days(i);
+            let mut total = 0;
+            if let Some(apps) = s.usage.days.get(&day_key(d)) {
+                for (a, secs) in apps {
+                    *per_app.entry(a.as_str()).or_default() += secs;
+                    total += secs;
+                }
+            }
+            per_day.push((d, total));
         }
+        let mut apps: Vec<AppRow> = per_app.into_iter().map(|(n, secs)| s.row(n, secs)).collect();
+        apps.sort_by(|a, b| b.secs.cmp(&a.secs).then_with(|| a.name.cmp(&b.name)));
+        Report { now: Self::now(&s), per_day, apps }
+    }
+
+    pub fn widget(&self) -> WidgetData {
+        let s = self.shared.lock().unwrap();
+        let today = s.usage.days.get(&day_key(Local::now().date_naive()));
+        let app_secs = s.current.as_deref().and_then(|c| today.and_then(|t| t.get(c))).copied().unwrap_or(0);
+        let total = today.map(|t| t.values().sum()).unwrap_or(0);
+        let mut session: Vec<AppRow> = s.session.iter().map(|(n, secs)| s.row(n, *secs)).collect();
+        session.sort_by(|a, b| b.secs.cmp(&a.secs));
+        session.truncate(40);
+        WidgetData { now: Self::now(&s), app_secs, total, session }
     }
 }
+pub(crate) use sys::version_names;
 
 mod sys {
     use std::ffi::c_void;
@@ -131,6 +219,7 @@ mod sys {
         BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits, GetObjectW,
         ReleaseDC,
     };
+    use windows_sys::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
     use windows_sys::Win32::System::SystemInformation::GetTickCount;
     use windows_sys::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -144,11 +233,10 @@ mod sys {
     use super::Icon;
 
     pub struct Foreground {
-        /// Nome mostrado (programa, ou site quando for um navegador).
-        pub name: String,
         /// Nome do executável sem extensão.
         pub exe: String,
         pub path: String,
+        pub title: String,
     }
 
     pub fn idle_secs() -> u32 {
@@ -193,20 +281,20 @@ mod sys {
             let path = String::from_utf16_lossy(&buf[..len as usize]);
             let file = path.rsplit('\\').next()?;
             let exe = file.rsplit_once('.').map_or(file, |(stem, _)| stem).to_owned();
-            let name = crate::appname::display_name(&exe, &window_title(hwnd));
-            Some(Foreground { name, exe, path })
+            Some(Foreground { exe, path, title: window_title(hwnd) })
         }
     }
 
     /// Ícone grande (32x32) do executável.
     pub fn exe_icon(path: &str) -> Option<Icon> {
+        let key = path.to_owned();
         unsafe {
             let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
             let mut large: HICON = std::ptr::null_mut();
             if ExtractIconExW(wide.as_ptr(), 0, &mut large, std::ptr::null_mut(), 1) == 0 || large.is_null() {
                 return None;
             }
-            let icon = icon_pixels(large);
+            let icon = icon_pixels(large, key);
             DestroyIcon(large);
             icon
         }
@@ -232,7 +320,7 @@ mod sys {
         }
     }
 
-    unsafe fn icon_pixels(icon: HICON) -> Option<Icon> {
+    unsafe fn icon_pixels(icon: HICON, key: String) -> Option<Icon> {
         unsafe {
             let mut info: ICONINFO = std::mem::zeroed();
             if GetIconInfo(icon, &mut info) == 0 {
@@ -259,11 +347,64 @@ mod sys {
                 for p in px.chunks_exact_mut(4) {
                     p.swap(0, 2);
                 }
-                Some(Icon { w: w as usize, h: h as usize, rgba: px })
+                Some(Icon { key, w: w as usize, h: h as usize, rgba: px })
             })();
             DeleteObject(info.hbmColor);
             DeleteObject(info.hbmMask);
             result
+        }
+    }
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(Some(0)).collect()
+    }
+
+    /// Lê um campo de texto do recurso de versão do executável.
+    unsafe fn version_string(block: &[u8], lang: u16, codepage: u16, field: &str) -> Option<String> {
+        unsafe {
+            let q = wide(&format!("\\StringFileInfo\\{lang:04x}{codepage:04x}\\{field}"));
+            let mut p: *mut c_void = std::ptr::null_mut();
+            let mut len = 0u32;
+            if VerQueryValueW(block.as_ptr() as *const c_void, q.as_ptr(), &mut p, &mut len) == 0 || p.is_null() || len == 0 {
+                return None;
+            }
+            let chars = std::slice::from_raw_parts(p as *const u16, len as usize);
+            let text = String::from_utf16_lossy(chars);
+            let text = text.trim_matches(|c: char| c == '\0' || c.is_whitespace());
+            (!text.is_empty()).then(|| text.to_owned())
+        }
+    }
+
+    /// (ProductName, FileDescription) do executável, se o recurso de versão existir.
+    pub fn version_names(path: &str) -> Option<(Option<String>, Option<String>)> {
+        unsafe {
+            let w = wide(path);
+            let size = GetFileVersionInfoSizeW(w.as_ptr(), std::ptr::null_mut());
+            if size == 0 {
+                return None;
+            }
+            let mut block = vec![0u8; size as usize];
+            if GetFileVersionInfoW(w.as_ptr(), 0, size, block.as_mut_ptr() as *mut c_void) == 0 {
+                return None;
+            }
+            let mut langs: Vec<(u16, u16)> = Vec::new();
+            let q = wide("\\VarFileInfo\\Translation");
+            let mut p: *mut c_void = std::ptr::null_mut();
+            let mut len = 0u32;
+            if VerQueryValueW(block.as_ptr() as *const c_void, q.as_ptr(), &mut p, &mut len) != 0 && !p.is_null() {
+                let pairs = std::slice::from_raw_parts(p as *const u16, len as usize / 2);
+                langs.extend(pairs.chunks_exact(2).map(|c| (c[0], c[1])));
+            }
+            langs.push((0x0409, 0x04B0));
+            langs.push((0x0409, 0x04E4));
+            for (lang, cp) in langs {
+                let product = version_string(&block, lang, cp, "ProductName");
+                let desc = version_string(&block, lang, cp, "FileDescription");
+                if product.is_some() || desc.is_some() {
+                    return Some((product, desc));
+                }
+            }
+            None
         }
     }
 }

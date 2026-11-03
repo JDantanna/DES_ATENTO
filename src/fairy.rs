@@ -1,6 +1,6 @@
-//! A Navi desenhada em código: orbe brilhante com quatro asas que batem.
+//! A fadinha do app, desenhada em código: orbe brilhante com quatro asas que batem.
 
-use eframe::egui::{Color32, Painter, Pos2, Shape, Stroke, pos2, vec2};
+use eframe::egui::{Color32, Painter, Pos2, Shape, Stroke, vec2};
 
 /// `flap` vai de -1 a 1 (abertura das asas); `glow` de 0 a 1 (brilho extra).
 pub fn draw(p: &Painter, c: Pos2, size: f32, flap: f32, glow: f32) {
@@ -32,5 +32,4 @@ pub fn draw(p: &Painter, c: Pos2, size: f32, flap: f32, glow: f32) {
     }
     p.circle_filled(c, r, Color32::from_rgb(190, 230, 255));
     p.circle_filled(c + vec2(-r * 0.2, -r * 0.2), r * 0.55, Color32::WHITE);
-    let _ = pos2(0.0, 0.0);
 }

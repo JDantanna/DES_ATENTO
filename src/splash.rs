@@ -125,11 +125,7 @@ impl Splash {
                 let a = smooth((t - self.task_start(i)) / TASK_FADE_IN);
                 paint(task, egui::pos2(left, top + 108.0 + i as f32 * line), Align2::LEFT_TOP, 30.0, a);
             }
-            let (hint, pulse) = if all_in {
-                ("clique para continuar", 0.55 + 0.35 * ((t * 3.0).sin() * 0.5 + 0.5))
-            } else {
-                ("clique para pular", 0.5)
-            };
+            let (hint, pulse) = if all_in { ("clique para continuar", 0.8) } else { ("clique para pular", 0.5) };
             ui.painter().text(
                 rect.center_bottom() - egui::vec2(0.0, 24.0),
                 Align2::CENTER_CENTER,
@@ -138,7 +134,10 @@ impl Splash {
                 ACCENT.gamma_multiply(pulse * master),
             );
         });
-        ctx.request_repaint();
+        // Esperando o clique a tela fica parada (zero uso de CPU); só anima enquanto surge ou some.
+        if !(all_in && self.leaving.is_none()) {
+            ctx.request_repaint();
+        }
         false
     }
 }

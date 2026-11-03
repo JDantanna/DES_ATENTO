@@ -283,3 +283,27 @@ mod tests {
         assert_eq!(t.next_after(feb), NaiveDate::from_ymd_opt(2026, 3, 30).unwrap());
     }
 }
+
+/// Preferências do app (`settings.json`).
+#[derive(Serialize, Deserialize, Default, Clone, Copy)]
+pub struct Settings {
+    /// Escolha do botão de minimizar: `Some(true)` bandeja, `Some(false)` só minimizar, `None` perguntar.
+    pub minimize_to_tray: Option<bool>,
+}
+
+impl Settings {
+    fn path() -> PathBuf {
+        data_dir().join("settings.json")
+    }
+
+    pub fn load() -> Self {
+        std::fs::read_to_string(Self::path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    }
+
+    pub fn save(&self) {
+        let _ = std::fs::create_dir_all(data_dir());
+        if let Ok(json) = serde_json::to_string_pretty(self) {
+            let _ = std::fs::write(Self::path(), json);
+        }
+    }
+}

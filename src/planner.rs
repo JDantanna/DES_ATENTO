@@ -106,7 +106,7 @@ impl Planner {
             }
             ui.label(egui::RichText::new(self.title()).heading());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.menu_button("⚙", |ui| {
+                ui.menu_button("Opções", |ui| {
                     ui.checkbox(&mut self.week_starts_sunday, "Semana começa no domingo");
                     ui.checkbox(&mut self.show_done, "Mostrar concluídas");
                 });
@@ -314,7 +314,7 @@ impl Planner {
                     }
                     let (ok, total) = t.subtasks_done();
                     if total > 0 {
-                        meta.push_str(&format!("  ☑ {ok}/{total}"));
+                        meta.push_str(&format!("  {ok}/{total}"));
                     }
                     for tag in &t.tags {
                         meta.push_str(&format!("  #{tag}"));
