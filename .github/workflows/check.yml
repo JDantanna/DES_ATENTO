@@ -1,0 +1,17 @@
+name: Verificar
+
+# Compila e roda os testes a cada envio para a main (a release só sai com tag v*).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Testes
+        run: cargo test --release

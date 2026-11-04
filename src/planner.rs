@@ -2,6 +2,7 @@ use chrono::{Datelike, Duration, Local, Months, NaiveDate};
 use eframe::egui::{self, Align2, Color32, FontId, Sense, vec2};
 
 use crate::model::{Store, tag_rgb};
+use crate::tasks::{OVERDUE, OVERDUE_TEXT};
 use crate::splash::MESES;
 use crate::theme::ACCENT;
 
@@ -141,6 +142,7 @@ impl Planner {
         let rows = ((offset + days + 6) / 7) as usize;
         let grid_start = first - Duration::days(offset);
         let today = Local::now().date_naive();
+        let now = Local::now().naive_local();
 
         let order: [usize; 7] = if self.week_starts_sunday { [6, 0, 1, 2, 3, 4, 5] } else { [0, 1, 2, 3, 4, 5, 6] };
         let avail = ui.available_size();
@@ -213,8 +215,12 @@ impl Planner {
                         self.drag = Some((t.id, d));
                     }
                     let lifted = self.drag.is_some_and(|(id, from)| id == t.id && from == d);
+                    // Atrasada: chip vermelho cheio e texto sublinhado.
+                    let overdue = !lifted && t.overdue(now);
                     let fill = if t.done || lifted {
                         Color32::from_gray(50)
+                    } else if overdue {
+                        OVERDUE.gamma_multiply(if r.hovered() { 1.0 } else { 0.85 })
                     } else {
                         base.gamma_multiply(if r.hovered() { 0.7 } else { 0.45 })
                     };
@@ -223,13 +229,15 @@ impl Planner {
                         Some(h) => format!("{} {}", h.format("%H:%M"), t.title),
                         None => t.title.clone(),
                     };
-                    painter.with_clip_rect(chip).text(
-                        chip.left_center() + vec2(4.0, 0.0),
-                        Align2::LEFT_CENTER,
-                        label,
-                        FontId::proportional(11.0),
-                        if t.done { Color32::GRAY } else { Color32::WHITE },
-                    );
+                    let color = if t.done { Color32::GRAY } else { Color32::WHITE };
+                    let galley = painter.layout_no_wrap(label, FontId::proportional(11.0), color);
+                    let at = chip.left_center() + vec2(4.0, -galley.size().y / 2.0);
+                    let clipped = painter.with_clip_rect(chip);
+                    if overdue {
+                        let y = at.y + galley.size().y;
+                        clipped.line_segment([egui::pos2(at.x, y), egui::pos2(at.x + galley.size().x, y)], egui::Stroke::new(1.0, color));
+                    }
+                    clipped.galley(at, galley, color);
                     if r.clicked() {
                         open = Some(t.id);
                     }
@@ -348,11 +356,14 @@ impl Planner {
     /// Cartões das tarefas de um dia; com `can_drag`, o título deles pode ser arrastado para outro dia.
     fn cards(&mut self, ui: &mut egui::Ui, store: &mut Store, d: NaiveDate, can_drag: bool, open: &mut Option<u64>, dirty: &mut bool) {
         let colors = &store.tag_colors;
+        let now = Local::now().naive_local();
         for i in self.tasks_on(store, d) {
             let t = &mut store.tasks[i];
             let [r, g, b] = t.color;
+            let overdue = t.overdue(now);
+            let fill = if overdue { OVERDUE.gamma_multiply(0.5) } else { Color32::from_rgb(r, g, b).gamma_multiply(if t.done { 0.12 } else { 0.28 }) };
             egui::Frame::new()
-                .fill(Color32::from_rgb(r, g, b).gamma_multiply(if t.done { 0.12 } else { 0.28 }))
+                .fill(fill)
                 .corner_radius(5.0)
                 .inner_margin(6.0)
                 .show(ui, |ui| {
@@ -362,6 +373,8 @@ impl Planner {
                         let mut text = egui::RichText::new(&t.title);
                         if t.done {
                             text = text.strikethrough().weak();
+                        } else if overdue {
+                            text = text.underline().strong().color(OVERDUE_TEXT);
                         }
                         let sense = if can_drag { Sense::click_and_drag() } else { Sense::click() };
                         let title = ui.add(egui::Label::new(text).selectable(false).sense(sense));

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use chrono::{Datelike, Local, NaiveDate, NaiveTime};
+use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime};
 use serde::{Deserialize, Serialize};
 
 /// Pasta de dados do app (`%APPDATA%\Navi`). Migra a antiga `Des_Atento` na primeira execução.
@@ -182,6 +182,18 @@ impl Task {
         nth.is_some_and(|k| self.repeat_times.is_none_or(|total| k < total as i64))
     }
 
+    /// Pendente e com a data (e hora, se houver) já passada.
+    pub fn overdue(&self, now: NaiveDateTime) -> bool {
+        if self.done {
+            return false;
+        }
+        match (self.date, self.time) {
+            (Some(d), Some(t)) => d.and_time(t) < now,
+            (Some(d), None) => d < now.date(),
+            _ => false,
+        }
+    }
+
     pub fn subtasks_done(&self) -> (usize, usize) {
         (self.subtasks.iter().filter(|s| s.done).count(), self.subtasks.len())
     }
@@ -231,6 +243,33 @@ impl Store {
         });
         self.dirty = true;
         self.next_id
+    }
+
+    /// Ordena as tarefas pela hora (as sem hora ficam no fim); a ordem passa a ser a da lista.
+    pub fn sort_by_time(&mut self, descending: bool) {
+        use std::cmp::Ordering;
+        self.tasks.sort_by(|a, b| match (a.time, b.time) {
+            (Some(x), Some(y)) if descending => y.cmp(&x),
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        });
+        self.dirty = true;
+    }
+
+    /// Leva a tarefa `id` para a posição da tarefa `target` (as do meio se deslocam).
+    pub fn move_task(&mut self, id: u64, target: u64) {
+        let (Some(from), Some(to)) =
+            (self.tasks.iter().position(|t| t.id == id), self.tasks.iter().position(|t| t.id == target))
+        else {
+            return;
+        };
+        if from != to {
+            let t = self.tasks.remove(from);
+            self.tasks.insert(to, t);
+            self.dirty = true;
+        }
     }
 
     pub fn remove(&mut self, id: u64) {
@@ -373,6 +412,37 @@ mod tests {
         t.done = true;
         assert!(!t.roll_over()); // era a última
         assert!(t.done);
+    }
+
+    #[test]
+    fn ordem_manual_e_por_hora() {
+        let mut s = Store::default();
+        let ids: Vec<u64> = ["a", "b", "c"].iter().map(|t| s.add((*t).into(), None)).collect();
+        s.tasks[0].time = NaiveTime::from_hms_opt(15, 0, 0);
+        s.tasks[2].time = NaiveTime::from_hms_opt(9, 0, 0);
+        let titles = |s: &Store| s.tasks.iter().map(|t| t.title.clone()).collect::<Vec<_>>();
+        s.sort_by_time(false);
+        assert_eq!(titles(&s), ["c", "a", "b"]); // sem hora vai para o fim
+        s.sort_by_time(true);
+        assert_eq!(titles(&s), ["a", "c", "b"]);
+        s.move_task(ids[1], ids[0]); // "b" sobe para a posição de "a"
+        assert_eq!(titles(&s), ["b", "a", "c"]);
+        s.move_task(ids[1], ids[2]); // e desce para a de "c"
+        assert_eq!(titles(&s), ["a", "c", "b"]);
+    }
+
+    #[test]
+    fn atrasada_so_se_pendente_e_no_passado() {
+        let now = NaiveDate::from_ymd_opt(2026, 5, 10).unwrap().and_hms_opt(12, 0, 0).unwrap();
+        let mut t = rent();
+        t.date = NaiveDate::from_ymd_opt(2026, 5, 9);
+        assert!(t.overdue(now));
+        t.date = NaiveDate::from_ymd_opt(2026, 5, 10);
+        assert!(!t.overdue(now)); // hoje sem hora ainda não atrasou
+        t.time = NaiveTime::from_hms_opt(11, 0, 0);
+        assert!(t.overdue(now));
+        t.done = true;
+        assert!(!t.overdue(now));
     }
 
     #[test]

@@ -1,32 +1,31 @@
-//! A fadinha do app, desenhada em código: orbe brilhante, dois pés e duas asas compridas em forma de folha.
-//! As asas batem como nas referências: abertas em V largo, depois fechadas quase na vertical.
+//! A fadinha do app, desenhada em código: orbe brilhante com quatro asas que batem.
 
 use eframe::egui::{Color32, Painter, Pos2, Shape, Stroke, vec2};
 
-/// `flap` vai de -1 a 1 (-1 asas fechadas, 1 abertas); `glow` de 0 a 1 (brilho extra).
+/// `flap` vai de -1 a 1 (abertura das asas); `glow` de 0 a 1 (brilho extra).
 pub fn draw(p: &Painter, c: Pos2, size: f32, flap: f32, glow: f32) {
-    let r = size * 0.17;
-    // Ângulo de cada asa em relação à vertical: ~10° fechada, ~65° aberta.
-    let open = 0.5 + 0.5 * flap;
-    let theta = 0.17 + 0.96 * open;
-    let (len, half) = (size * 0.66, size * 0.07);
-    for side in [-1.0f32, 1.0] {
-        let dir = vec2(side * theta.sin(), -theta.cos());
+    // (ângulo em repouso, comprimento, largura, sentido do giro). As asas giram em torno do corpo,
+    // as de cima e as de baixo em oposição, como um bater de asas de verdade.
+    let wings = [(-2.36f32, 0.50f32, 0.20f32, 1.0f32), (-0.78, 0.50, 0.20, -1.0), (2.2, 0.34, 0.15, -0.7), (0.94, 0.34, 0.15, 0.7)];
+    for (rest, len, wid, turn) in wings {
+        let ang = rest + turn * flap * 0.55;
+        let dir = vec2(ang.cos(), ang.sin());
         let perp = vec2(-dir.y, dir.x);
-        // Folha: estreita na base, mais larga a ~35% do comprimento, ponta fina.
-        let edge = |t: f32| half * (std::f32::consts::PI * t.powf(0.75)).sin();
-        let mut pts: Vec<Pos2> = (0..=14).map(|k| k as f32 / 14.0).map(|t| c + dir * (len * t) + perp * edge(t)).collect();
-        pts.extend((0..=14).rev().map(|k| k as f32 / 14.0).map(|t| c + dir * (len * t) - perp * edge(t)));
+        let l = size * len * (0.9 + 0.1 * (1.0 - flap.abs()));
+        let w = size * wid;
+        let pts: Vec<Pos2> = (0..28)
+            .map(|k| {
+                let th = std::f32::consts::TAU * k as f32 / 28.0;
+                c + dir * (l * (0.5 + 0.5 * th.cos())) + perp * (0.5 * w * th.sin())
+            })
+            .collect();
         p.add(Shape::convex_polygon(
             pts,
-            Color32::from_rgba_unmultiplied(214, 238, 255, 190),
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(240, 250, 255, 210)),
+            Color32::from_rgba_unmultiplied(205, 235, 255, 150),
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(235, 248, 255, 200)),
         ));
     }
-    // Pés
-    for side in [-1.0f32, 1.0] {
-        p.circle_filled(c + vec2(side * r * 0.62, r * 1.18), r * 0.42, Color32::from_rgb(190, 228, 250));
-    }
+    let r = size * 0.2;
     for i in (1..=5).rev() {
         let k = i as f32 / 5.0;
         let alpha = ((14.0 + 30.0 * glow) * (1.1 - k)) as u8;

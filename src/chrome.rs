@@ -14,6 +14,10 @@ pub enum Glyph {
     Close,
     Refresh,
     Trash,
+    /// Seta para cima: ordem crescente.
+    SortUp,
+    /// Seta para baixo: ordem decrescente.
+    SortDown,
 }
 
 pub fn window_button(ui: &mut egui::Ui, glyph: Glyph) -> Response {
@@ -69,6 +73,12 @@ pub fn icon_button(ui: &mut egui::Ui, glyph: Glyph, spin: f32) -> Response {
                 col,
                 Stroke::NONE,
             ));
+        }
+        Glyph::SortUp | Glyph::SortDown => {
+            let s = if glyph == Glyph::SortUp { -1.0 } else { 1.0 };
+            p.line_segment([c + vec2(0.0, -6.0 * s), c + vec2(0.0, 6.0 * s)], st);
+            p.line_segment([c + vec2(-4.5, 1.5 * s), c + vec2(0.0, 6.0 * s)], st);
+            p.line_segment([c + vec2(4.5, 1.5 * s), c + vec2(0.0, 6.0 * s)], st);
         }
         Glyph::Trash => {
             p.line_segment([c + vec2(-6.0, -4.0), c + vec2(6.0, -4.0)], st); // tampa

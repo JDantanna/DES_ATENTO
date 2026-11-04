@@ -9,6 +9,9 @@ use crate::model::{Repeat, Store, Subtask, Task, tag_rgb};
 use crate::theme::ACCENT;
 
 const ROW_H: f32 = 42.0;
+/// Vermelho das tarefas atrasadas (preenchimento e texto).
+pub const OVERDUE: Color32 = Color32::from_rgb(210, 60, 60);
+pub const OVERDUE_TEXT: Color32 = Color32::from_rgb(255, 130, 130);
 /// Largura do campo de nova tarefa (basta para o título; o resto vai no editor).
 pub const NEW_TASK_W: f32 = 200.0;
 /// Cinza dos detalhes de cada tarefa.
@@ -60,6 +63,8 @@ pub struct TasksView {
     tags_open: bool,
     /// Áreas dos botões de tag no quadro atual (um clique fora delas desfaz o filtro).
     chip_rects: Vec<egui::Rect>,
+    /// Tarefa cuja linha está sendo arrastada para mudar a ordem.
+    row_drag: Option<u64>,
     /// Texto em edição de cada tag no painel de tags.
     tag_edit: HashMap<String, String>,
 }
@@ -79,6 +84,7 @@ impl TasksView {
             msg: None,
             tags_open: false,
             chip_rects: Vec::new(),
+            row_drag: None,
             tag_edit: HashMap::new(),
         }
     }
@@ -195,6 +201,13 @@ impl TasksView {
             if ui.selectable_label(self.tags_open, "Tags").on_hover_text("Editar cores e nomes das tags").clicked() {
                 self.tags_open = !self.tags_open;
             }
+            // Ordenar pela hora (setas) — depois dá para ajustar à mão, arrastando as linhas.
+            if chrome::icon_button(ui, Glyph::SortUp, 0.0).on_hover_text("Ordenar por hora: crescente").clicked() {
+                store.sort_by_time(false);
+            }
+            if chrome::icon_button(ui, Glyph::SortDown, 0.0).on_hover_text("Ordenar por hora: decrescente").clicked() {
+                store.sort_by_time(true);
+            }
             ui.menu_button("Importar / exportar", |ui| self.ics_menu(ui, store));
         });
         if let Some(m) = &self.msg {
@@ -230,27 +243,35 @@ impl TasksView {
             .filter(|(_, t)| self.tag_filter.as_ref().is_none_or(|f| t.tags.contains(f)))
             .map(|(i, _)| i)
             .collect();
-        idx.sort_by_key(|&i| {
-            let t = &store.tasks[i];
-            (t.done, t.date, t.time, t.id)
-        });
+        // A ordem é a da lista (que se rearranja arrastando); as concluídas ficam no fim.
+        idx.sort_by_key(|&i| store.tasks[i].done);
 
         let mut dirty = false;
         let mut delete = None;
         let colors = &store.tag_colors;
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        let now = Local::now().naive_local();
+        let mut rows: Vec<(egui::Rect, u64)> = Vec::with_capacity(idx.len());
+        let scroll = egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             if idx.is_empty() {
                 ui.weak("Nada por aqui.");
             }
             for i in idx {
                 let t = &mut store.tasks[i];
-                // A linha inteira é clicável; os controles dentro dela (caixa, texto) têm prioridade.
+                // A linha inteira é clicável e arrastável; os controles dentro dela (caixa, texto) têm prioridade.
                 let row = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), ROW_H));
-                let resp = ui.interact(row, ui.scope_id().with(("linha", t.id)), egui::Sense::click());
+                rows.push((row, t.id));
+                let resp = ui.interact(row, ui.scope_id().with(("linha", t.id)), egui::Sense::click_and_drag());
                 let selected = self.selected == Some(t.id);
-                if selected || resp.hovered() {
+                let overdue = t.overdue(now);
+                if overdue {
+                    // Atrasada: preenchida de vermelho.
+                    ui.painter().rect_filled(row, 7.0, OVERDUE.gamma_multiply(if resp.hovered() || selected { 0.38 } else { 0.26 }));
+                } else if selected || resp.hovered() {
                     let a = if selected { 0.22 } else { 0.10 };
                     ui.painter().rect_filled(row, 7.0, ACCENT.gamma_multiply(a));
+                }
+                if resp.drag_started() {
+                    self.row_drag = Some(t.id);
                 }
                 if resp.clicked() {
                     self.selected = Some(t.id);
@@ -282,17 +303,18 @@ impl TasksView {
                         let mut title = RichText::new(&t.title);
                         if t.done {
                             title = title.strikethrough().weak();
+                        } else if overdue {
+                            title = title.underline().strong().color(OVERDUE_TEXT);
                         }
                         ui.add(egui::Label::new(title).selectable(false).truncate());
 
-                        let overdue = !t.done && t.date.is_some_and(|d| d < today);
                         let mut parts: Vec<(String, Color32)> = Vec::new();
                         if let (Some(d), true) = (t.date, self.filter != Filter::Hoje || overdue) {
-                            let color = if overdue { Color32::from_rgb(230, 110, 110) } else { DIM };
+                            let color = if overdue { OVERDUE_TEXT } else { DIM };
                             parts.push((d.format("%d/%m").to_string(), color));
                         }
                         if let Some(h) = t.time {
-                            parts.push((h.format("%H:%M").to_string(), DIM));
+                            parts.push((h.format("%H:%M").to_string(), if overdue { OVERDUE_TEXT } else { DIM }));
                         }
                         let (ok, total) = t.subtasks_done();
                         if total > 0 {
@@ -317,12 +339,54 @@ impl TasksView {
                 });
             }
         });
+        self.finish_row_drag(ui, store, &rows, scroll.inner_rect);
         store.dirty |= dirty;
         if let Some(id) = delete {
             store.remove(id);
             if self.selected == Some(id) {
                 self.selected = None;
                 self.buf_for = None;
+            }
+        }
+    }
+
+    /// Cancela um arrasto em andamento (ao sair da aba).
+    pub fn cancel_drag(&mut self) {
+        self.row_drag = None;
+    }
+
+    /// Acompanha o arrasto de uma linha: mostra a linha sendo levada e onde ela vai cair; ao soltar, reordena.
+    fn finish_row_drag(&mut self, ui: &egui::Ui, store: &mut Store, rows: &[(egui::Rect, u64)], area: egui::Rect) {
+        let Some(id) = self.row_drag else { return };
+        let ctx = ui.ctx();
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.row_drag = None;
+            return;
+        }
+        let pos = ctx.pointer_latest_pos();
+        let target = pos
+            .filter(|p| area.contains(*p))
+            .and_then(|p| rows.iter().find(|(r, _)| r.y_range().contains(p.y)).copied())
+            .filter(|(_, t)| *t != id);
+        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        if let Some((r, tid)) = target {
+            let at = |id| store.tasks.iter().position(|t| t.id == id);
+            // Subindo, cai acima da linha de destino; descendo, abaixo.
+            let y = if at(id) > at(tid) { r.top() } else { r.bottom() };
+            ui.painter().line_segment([egui::pos2(r.left() + 4.0, y), egui::pos2(r.right() - 4.0, y)], egui::Stroke::new(2.0, ACCENT));
+        }
+        if let (Some(p), Some(t)) = (pos, store.tasks.iter().find(|t| t.id == id)) {
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, ui.scope_id().with("navi_row_drag")));
+            let galley = painter.layout_no_wrap(t.title.clone(), egui::FontId::proportional(13.0), Color32::WHITE);
+            let [r, g, b] = t.color;
+            let rect = egui::Rect::from_min_size(p + egui::vec2(12.0, 8.0), galley.size() + egui::vec2(14.0, 8.0));
+            painter.rect_filled(rect, 5.0, Color32::from_rgb(r, g, b).gamma_multiply(0.9));
+            painter.galley(rect.min + egui::vec2(7.0, 4.0), galley, Color32::WHITE);
+        }
+        if !ctx.input(|i| i.pointer.any_down()) {
+            self.row_drag = None;
+            if let Some((_, tid)) = target {
+                store.move_task(id, tid);
             }
         }
     }

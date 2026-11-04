@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -57,6 +57,8 @@ pub struct CoachView {
     open_app: bool,
     /// Texturas dos ícones, por caminho do executável.
     icons: HashMap<String, egui::TextureHandle>,
+    /// Cor de fundo escolhida para cada programa (pelo nome exibido).
+    colors: AppColors,
 }
 
 const ICON: f32 = 20.0;
@@ -79,6 +81,90 @@ fn app_icon(ui: &mut egui::Ui, tex: Option<egui::TextureId>) {
         None => {
             ui.allocate_space(vec2(ICON, ICON));
         }
+    }
+}
+
+/// Faixas de tempo, da maior para a menor, como fração do programa mais usado: (mínimo, cor).
+const BANDS: [(f32, Color32); 4] = [
+    (0.75, Color32::from_rgb(232, 92, 92)),
+    (0.50, Color32::from_rgb(240, 160, 66)),
+    (0.25, Color32::from_rgb(88, 190, 130)),
+    (0.0, Color32::from_rgb(96, 140, 236)),
+];
+
+fn band_color(frac: f32) -> Color32 {
+    BANDS.iter().find(|(min, _)| frac >= *min).map_or(BANDS[3].1, |b| b.1)
+}
+
+/// Legenda das cores das barras, com os tempos de cada faixa (relativos ao programa mais usado).
+fn legend(ui: &mut egui::Ui, max: u64) {
+    let at = |f: f32| fmt((max as f32 * f) as u64);
+    let labels = [
+        format!("mais de {}", at(0.75)),
+        format!("{} a {}", at(0.5), at(0.75)),
+        format!("{} a {}", at(0.25), at(0.5)),
+        format!("até {}", at(0.25)),
+    ];
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        for ((_, color), label) in BANDS.iter().zip(labels) {
+            let (sq, _) = ui.allocate_exact_size(vec2(11.0, 11.0), Sense::hover());
+            ui.painter().rect_filled(sq, 3.0, *color);
+            ui.weak(label);
+            ui.add_space(8.0);
+        }
+    });
+}
+
+const PRESETS: [[u8; 3]; 8] =
+    [[220, 70, 70], [235, 140, 60], [225, 190, 60], [90, 190, 120], [70, 170, 200], [90, 120, 230], [160, 100, 220], [210, 100, 170]];
+
+type AppColors = BTreeMap<String, [u8; 3]>;
+
+fn colors_path() -> std::path::PathBuf {
+    crate::model::data_dir().join("app_colors.json")
+}
+
+fn load_colors() -> AppColors {
+    std::fs::read_to_string(colors_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+fn save_colors(colors: &AppColors) {
+    let _ = std::fs::create_dir_all(crate::model::data_dir());
+    if let Ok(json) = serde_json::to_string(colors) {
+        let _ = std::fs::write(colors_path(), json);
+    }
+}
+
+/// Conteúdo do menu de botão direito: escolher (ou tirar) a cor de fundo de um programa.
+fn color_menu(ui: &mut egui::Ui, name: &str, colors: &mut AppColors, changed: &mut bool) {
+    ui.label(egui::RichText::new(format!("Cor de fundo: {name}")).strong());
+    ui.horizontal(|ui| {
+        for c in PRESETS {
+            let (r, resp) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
+            ui.painter().circle_filled(r.center(), 8.0, Color32::from_rgb(c[0], c[1], c[2]));
+            if resp.hovered() {
+                ui.painter().circle_stroke(r.center(), 9.5, Stroke::new(1.5, Color32::WHITE));
+            }
+            if resp.clicked() {
+                colors.insert(name.to_owned(), c);
+                *changed = true;
+                ui.close();
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Outra cor:");
+        let mut rgb = colors.get(name).copied().unwrap_or([110, 142, 251]);
+        if ui.color_edit_button_srgb(&mut rgb).changed() {
+            colors.insert(name.to_owned(), rgb);
+            *changed = true;
+        }
+    });
+    if colors.contains_key(name) && ui.button("Sem cor").clicked() {
+        colors.remove(name);
+        *changed = true;
+        ui.close();
     }
 }
 
@@ -113,6 +199,7 @@ impl CoachView {
             just_opened: false,
             open_app: false,
             icons: HashMap::new(),
+            colors: load_colors(),
         }
     }
 
@@ -148,18 +235,7 @@ impl CoachView {
                 });
             });
             ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                let now = &report.now;
-                if now.idle {
-                    ui.weak("Ocioso (sem tempo contado)");
-                } else if let Some(cur) = now.current.as_deref() {
-                    let tex = icon_tex(&mut self.icons, ui.ctx(), now.icon.as_ref());
-                    app_icon(ui, tex);
-                    ui.weak(format!("Agora: {cur}"));
-                } else {
-                    ui.weak("Agora: –");
-                }
-            });
+            self.status_banner(ui, &report.now);
             ui.add_space(6.0);
             ui.label(egui::RichText::new(format!("Total: {}", fmt(total))).heading());
             ui.add_space(8.0);
@@ -173,21 +249,74 @@ impl CoachView {
                 ui.weak("Ainda sem dados. Use outros programas e volte aqui.");
             }
             let max = report.apps.first().map(|a| a.secs).unwrap_or(1).max(1);
+            if !report.apps.is_empty() {
+                legend(ui, max);
+                ui.add_space(4.0);
+            }
+            let mut changed = false;
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 for app in &report.apps {
                     let tex = icon_tex(&mut self.icons, ui.ctx(), app.icon.as_ref());
-                    ui.horizontal(|ui| {
+                    // Fundo na cor escolhida para o programa (botão direito para mudar); a barra mostra o tempo.
+                    let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
+                    if let Some([r, g, b]) = self.colors.get(&app.name) {
+                        ui.painter().rect_filled(row, 6.0, Color32::from_rgb(*r, *g, *b).gamma_multiply(0.5));
+                    }
+                    let bar = band_color(app.secs as f32 / max as f32);
+                    let layout = egui::Layout::left_to_right(egui::Align::Center);
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(row.shrink2(vec2(4.0, 1.0))).layout(layout), |ui| {
                         app_icon(ui, tex);
                         ui.add(
                             egui::ProgressBar::new(app.secs as f32 / max as f32)
-                                .fill(ACCENT.gamma_multiply(0.6))
+                                .fill(bar.gamma_multiply(0.8))
                                 .desired_width(ui.available_width())
                                 .text(format!("{}   {}", app.name, fmt(app.secs))),
                         );
                     });
+                    resp.on_hover_text("Botão direito: cor de fundo").context_menu(|ui| color_menu(ui, &app.name, &mut self.colors, &mut changed));
                 }
             });
+            if changed {
+                save_colors(&self.colors);
+            }
         });
+    }
+
+    /// Faixa no topo do Coach: mostra que o rastreador está rodando (mesmo com o widget fechado) ou pausado.
+    fn status_banner(&mut self, ui: &mut egui::Ui, now: &crate::tracker::Now) {
+        let tracking = !now.idle && now.current.is_some();
+        let tint = if tracking { Color32::from_rgb(80, 200, 120) } else { Color32::from_rgb(230, 170, 60) };
+        let t = ui.input(|i| i.time) as f32;
+        if tracking {
+            // Pulso suave, em ~10 quadros por segundo, só enquanto esta aba está aberta.
+            ui.ctx().request_repaint_after(Duration::from_millis(100));
+        }
+        egui::Frame::new()
+            .fill(tint.gamma_multiply(0.12))
+            .stroke(Stroke::new(1.0, tint.gamma_multiply(0.45)))
+            .corner_radius(8)
+            .inner_margin(egui::Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    let (dot, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+                    let pulse = if tracking { 0.5 + 0.5 * (t * 3.0).sin() } else { 0.0 };
+                    ui.painter().circle_filled(dot.center(), 5.0 + 3.5 * pulse, tint.gamma_multiply(0.35 * (1.0 - pulse)));
+                    ui.painter().circle_filled(dot.center(), 4.5, tint);
+                    ui.label(egui::RichText::new(if tracking { "Rastreando" } else { "Pausado" }).strong().color(tint));
+                    if tracking {
+                        let tex = icon_tex(&mut self.icons, ui.ctx(), now.icon.as_ref());
+                        app_icon(ui, tex);
+                        ui.label(now.current.as_deref().unwrap_or(""));
+                    } else {
+                        ui.weak("sem atividade; o tempo não está sendo contado");
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let widget_on = self.widget && !self.closing;
+                        ui.weak(if widget_on { "widget aberto" } else { "widget fechado: o rastreamento continua em segundo plano" });
+                    });
+                });
+            });
     }
 
     /// Janela flutuante; deve ser chamada a cada quadro, qualquer que seja a aba.
@@ -247,8 +376,13 @@ impl CoachView {
         let open = self.widget_list;
         // Sem nada sendo rastreado (ocioso ou sem programa), o widget fica vermelho.
         let tracking = !data.now.idle && data.now.current.is_some();
+        let tracked_name = if tracking { data.now.current.clone() } else { None };
+        // Cor de fundo escolhida para o programa em uso (botão direito no widget ou no Coach).
+        let program = tracked_name.as_deref().and_then(|n| self.colors.get(n)).copied();
+        let mut colors = std::mem::take(&mut self.colors);
+        let mut colors_changed = false;
         let (fill, time_color) = if tracking {
-            (BG, ACCENT)
+            (program.map_or(BG, |[r, g, b]| BG.lerp_to_gamma(Color32::from_rgb(r, g, b), 0.5)), ACCENT)
         } else {
             (Color32::from_rgb(58, 20, 24), Color32::from_rgb(255, 120, 120))
         };
@@ -276,6 +410,12 @@ impl CoachView {
             if drag.double_clicked() {
                 open_app = true;
             }
+            drag.context_menu(|ui| match &tracked_name {
+                Some(n) => color_menu(ui, n, &mut colors, &mut colors_changed),
+                None => {
+                    ui.weak("Nada sendo rastreado agora.");
+                }
+            });
             // A fonte do relógio acompanha a largura da janela.
             let k = (full.width() / WIDGET_W).clamp(0.7, 2.4);
             egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(14)).show(ui, |ui| {
@@ -318,6 +458,10 @@ impl CoachView {
                 }
             });
         });
+        self.colors = colors;
+        if colors_changed {
+            save_colors(&self.colors);
+        }
         if let Some(s) = size {
             self.widget_w = s.x.max(MIN_W);
         }
@@ -332,7 +476,9 @@ impl CoachView {
             self.open_app = true;
             self.closing = true;
         }
+        // Fechar o widget também abre o app.
         if close {
+            self.open_app = true;
             self.closing = true;
         }
     }
@@ -377,17 +523,16 @@ fn chart(ui: &mut egui::Ui, days: &[(chrono::NaiveDate, u64)]) {
 
 /// Botão da fadinha: as asas batem quando o mouse passa por cima. Retorna `true` ao clicar.
 fn fairy_button(ui: &mut egui::Ui, active: bool) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(vec2(64.0, 52.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(64.0, 44.0), Sense::click());
     let amp = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.18);
     let time = ui.input(|i| i.time) as f32;
-    // Uma batida a cada 0,4 s, o ritmo medido no vídeo de referência.
-    let flap = (time * 15.7).sin() * amp;
+    let flap = (time * 13.0).sin() * amp;
     if amp > 0.0 {
         ui.ctx().request_repaint();
     }
     let glow = if active { 1.0 } else { amp };
     // Em hover ela voa em oito, subindo e descendo, enquanto bate as asas.
     let sway = vec2((time * 5.0).sin() * 5.0, (time * 10.0).sin() * 4.0) * amp;
-    crate::fairy::draw(ui.painter(), rect.center() + vec2(0.0, 7.0) + sway, 40.0 + 6.0 * amp, flap, glow);
+    crate::fairy::draw(ui.painter(), rect.center() + vec2(0.0, 2.0) + sway, 40.0 + 6.0 * amp, flap, glow);
     resp.on_hover_text(if active { "Fechar widget" } else { "Abrir widget" }).clicked()
 }

@@ -361,6 +361,9 @@ impl eframe::App for App {
         if self.tab != Tab::Calendario {
             self.planner.cancel_drag();
         }
+        if self.tab != Tab::Tarefas {
+            self.tasks.cancel_drag();
+        }
 
         self.coach.floating(ui, &self.tracker);
         if self.coach.take_opened() {
