@@ -9,6 +9,8 @@ const FIRST_TASK_AT: f32 = 1.5;
 const TASK_FADE_IN: f32 = 0.6;
 const LEAVE_FADE: f32 = 0.35;
 const MAX_LINES: usize = 8;
+/// Espaço do marcador antes de cada tarefa.
+const BULLET_W: f32 = 30.0;
 pub const DIAS: [&str; 7] = [
     "segunda-feira",
     "terça-feira",
@@ -27,16 +29,17 @@ pub struct Splash {
     start: Option<f64>,
     /// Instante do clique que encerra a abertura (inicia o fade final).
     leaving: Option<f64>,
-    /// O som de boas-vindas já tocou (uma vez, quando a data termina de aparecer).
-    greeted: bool,
     header: String,
-    tasks: Vec<String>,
+    /// Linhas da lista; `true` marca as que são tarefas de verdade (ganham marcador).
+    tasks: Vec<(String, bool)>,
+    /// Quantas tarefas de dias anteriores seguem sem finalizar (aviso embaixo da lista).
+    behind: usize,
     /// Intervalo entre o surgimento de uma tarefa e a seguinte.
     gap: f32,
 }
 
 impl Splash {
-    pub fn new(mut tasks: Vec<String>) -> Self {
+    pub fn new(today_tasks: Vec<String>, behind: usize) -> Self {
         let d = Local::now().date_naive();
         let header = format!(
             "Hoje é {}, {:02} de {} de {}.",
@@ -45,16 +48,17 @@ impl Splash {
             MESES[d.month0() as usize],
             d.year()
         );
+        let mut tasks: Vec<(String, bool)> = today_tasks.into_iter().map(|t| (t, true)).collect();
         if tasks.is_empty() {
-            tasks.push("Nenhuma tarefa por enquanto.".to_owned());
+            tasks.push(("Nenhuma tarefa para hoje.".to_owned(), false));
         }
         if tasks.len() > MAX_LINES {
             let extra = tasks.len() - (MAX_LINES - 1);
             tasks.truncate(MAX_LINES - 1);
-            tasks.push(format!("e mais {extra}..."));
+            tasks.push((format!("e mais {extra}..."), false));
         }
         let gap = (0.5f32).min(3.5 / tasks.len() as f32);
-        Self { start: None, leaving: None, greeted: false, header, tasks, gap }
+        Self { start: None, leaving: None, header, tasks, behind, gap }
     }
 
     fn task_start(&self, i: usize) -> f32 {
@@ -70,11 +74,6 @@ impl Splash {
         let start = *self.start.get_or_insert(now);
         let t = (now - start) as f32;
 
-        if !self.greeted && t >= HEAD_FADE_IN {
-            self.greeted = true;
-            crate::sound::play(crate::sound::Sound::BemVindo);
-        }
-
         let advance = ctx.input(|i| {
             i.pointer.any_click() || i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Enter)
         });
@@ -88,12 +87,13 @@ impl Splash {
         if master <= 0.0 {
             return true;
         }
-        let all_in = t >= self.task_start(self.tasks.len() - 1) + TASK_FADE_IN;
+        // O aviso de pendências (se houver) surge depois da última tarefa; a tela espera por ele também.
+        let all_in = t >= self.task_start(self.tasks.len() - 1) + TASK_FADE_IN + if self.behind > 0 { 0.8 } else { 0.0 };
 
         egui::CentralPanel::default().show(root, |ui| {
             let rect = ui.max_rect();
             let line = 42.0;
-            let block = 84.0 + 24.0 + self.tasks.len() as f32 * line;
+            let block = 84.0 + 24.0 + self.tasks.len() as f32 * line + if self.behind > 0 { 40.0 } else { 0.0 };
             let top = rect.center().y - block / 2.0;
             let x = rect.center().x;
             let paint = |text: &str, pos: egui::Pos2, align: Align2, size: f32, a: f32| {
@@ -106,24 +106,43 @@ impl Splash {
                     Color32::WHITE.gamma_multiply(a),
                 );
             };
-            // Título centralizado.
-            paint(
-                &format!("{}\nSuas tarefas para hoje são", self.header),
-                egui::pos2(x, top),
-                Align2::CENTER_TOP,
-                28.0,
-                smooth(t / HEAD_FADE_IN),
-            );
-            // Tarefas alinhadas à esquerda, num bloco centralizado pela linha mais larga.
+            // Título centralizado, cada linha no centro (um texto de várias linhas sairia alinhado à esquerda).
+            let head_a = smooth(t / HEAD_FADE_IN);
+            paint(&self.header, egui::pos2(x, top), Align2::CENTER_TOP, 28.0, head_a);
+            paint("Suas tarefas para hoje são", egui::pos2(x, top + 40.0), Align2::CENTER_TOP, 28.0, head_a);
+            // Tarefas alinhadas à esquerda, com marcador, num bloco centralizado pela linha mais larga.
             let widest = self
                 .tasks
                 .iter()
-                .map(|s| ui.painter().layout_no_wrap(s.clone(), FontId::proportional(30.0), Color32::WHITE).size().x)
+                .map(|(s, _)| ui.painter().layout_no_wrap(s.clone(), FontId::proportional(30.0), Color32::WHITE).size().x)
                 .fold(0.0, f32::max);
-            let left = x - widest / 2.0;
-            for (i, task) in self.tasks.iter().enumerate() {
+            let left = x - (widest + BULLET_W) / 2.0;
+            for (i, (task, bullet)) in self.tasks.iter().enumerate() {
                 let a = smooth((t - self.task_start(i)) / TASK_FADE_IN);
-                paint(task, egui::pos2(left, top + 108.0 + i as f32 * line), Align2::LEFT_TOP, 30.0, a);
+                let y = top + 108.0 + i as f32 * line;
+                if *bullet {
+                    let alpha = (a * master).clamp(0.0, 1.0);
+                    ui.painter().circle_filled(egui::pos2(left + 8.0, y + 20.0 + (1.0 - a) * 8.0), 5.0, ACCENT.gamma_multiply(alpha));
+                }
+                let text_x = if *bullet { left + BULLET_W } else { left };
+                paint(task, egui::pos2(text_x, y), Align2::LEFT_TOP, 30.0, a);
+            }
+            // Pendências de dias anteriores: só um aviso, sem listar.
+            if self.behind > 0 {
+                let a = smooth((t - self.task_start(self.tasks.len()) - 0.2) / TASK_FADE_IN);
+                let text = if self.behind == 1 {
+                    "Há 1 tarefa de dias anteriores sem finalizar.".to_owned()
+                } else {
+                    format!("Há {} tarefas de dias anteriores sem finalizar.", self.behind)
+                };
+                let a = (a * master).clamp(0.0, 1.0);
+                ui.painter().text(
+                    egui::pos2(x, top + 108.0 + self.tasks.len() as f32 * line + 22.0),
+                    Align2::CENTER_TOP,
+                    text,
+                    FontId::proportional(17.0),
+                    Color32::from_rgb(240, 180, 90).gamma_multiply(a),
+                );
             }
             let (hint, pulse) = if all_in { ("clique para continuar", 0.8) } else { ("clique para pular", 0.5) };
             ui.painter().text(

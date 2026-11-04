@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{Local, NaiveDate, NaiveTime};
 use eframe::egui::{self, Color32, RichText};
@@ -65,6 +65,8 @@ pub struct TasksView {
     chip_rects: Vec<egui::Rect>,
     /// Tarefa cuja linha está sendo arrastada para mudar a ordem.
     row_drag: Option<u64>,
+    /// Tarefas com as informações recolhidas no rodapé da linha (por padrão ficam abertas).
+    collapsed: HashSet<u64>,
     /// Texto em edição de cada tag no painel de tags.
     tag_edit: HashMap<String, String>,
 }
@@ -85,6 +87,7 @@ impl TasksView {
             tags_open: false,
             chip_rects: Vec::new(),
             row_drag: None,
+            collapsed: HashSet::new(),
             tag_edit: HashMap::new(),
         }
     }
@@ -258,7 +261,20 @@ impl TasksView {
             for i in idx {
                 let t = &mut store.tasks[i];
                 // A linha inteira é clicável e arrastável; os controles dentro dela (caixa, texto) têm prioridade.
-                let row = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), ROW_H));
+                let width = ui.available_width();
+                // Informações da tarefa: aparecem no rodapé da linha (até 4 linhas) e podem ser recolhidas pela seta.
+                let notes = t.notes.trim();
+                let has_notes = !notes.is_empty();
+                let open = has_notes && !self.collapsed.contains(&t.id);
+                let footer = open.then(|| {
+                    let mut job = egui::text::LayoutJob::simple(notes.to_owned(), egui::FontId::proportional(12.0), DIM, width - 70.0);
+                    job.wrap.max_rows = 4;
+                    job.wrap.overflow_character = Some('…');
+                    ui.painter().layout_job(job)
+                });
+                let extra = footer.as_ref().map_or(0.0, |g| g.size().y + 8.0);
+                let row = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(width, ROW_H + extra));
+                let top_row = egui::Rect::from_min_size(row.min, egui::vec2(width - 30.0, ROW_H));
                 rows.push((row, t.id));
                 let resp = ui.interact(row, ui.scope_id().with(("linha", t.id)), egui::Sense::click_and_drag());
                 let selected = self.selected == Some(t.id);
@@ -288,7 +304,7 @@ impl TasksView {
                     }
                 });
                 let layout = egui::Layout::left_to_right(egui::Align::Center);
-                ui.scope_builder(egui::UiBuilder::new().max_rect(row).layout(layout), |ui| {
+                ui.scope_builder(egui::UiBuilder::new().max_rect(top_row).layout(layout), |ui| {
                     ui.set_min_height(ROW_H);
                     if ui.checkbox(&mut t.done, "").changed() {
                         t.roll_over();
@@ -337,6 +353,26 @@ impl TasksView {
                         }
                     });
                 });
+                ui.add_space(extra);
+                if let Some(g) = footer {
+                    ui.painter().galley(egui::pos2(row.left() + 36.0, row.top() + ROW_H - 4.0), g, DIM);
+                }
+                if has_notes {
+                    // Seta que recolhe/expande as informações.
+                    let cell = egui::Rect::from_center_size(egui::pos2(row.right() - 16.0, row.top() + ROW_H / 2.0), egui::vec2(22.0, 22.0));
+                    let arrow = ui
+                        .interact(cell, ui.scope_id().with(("seta", t.id)), egui::Sense::click())
+                        .on_hover_text(if open { "Recolher informações" } else { "Mostrar informações" });
+                    let c = cell.center();
+                    let col = if arrow.hovered() { Color32::WHITE } else { Color32::from_gray(160) };
+                    let s = if open { -1.0 } else { 1.0 };
+                    let st = egui::Stroke::new(1.6, col);
+                    ui.painter().line_segment([c + egui::vec2(-4.5, -2.0 * s), c + egui::vec2(0.0, 2.0 * s)], st);
+                    ui.painter().line_segment([c + egui::vec2(4.5, -2.0 * s), c + egui::vec2(0.0, 2.0 * s)], st);
+                    if arrow.clicked() && !self.collapsed.remove(&t.id) {
+                        self.collapsed.insert(t.id);
+                    }
+                }
             }
         });
         self.finish_row_drag(ui, store, &rows, scroll.inner_rect);

@@ -9,7 +9,6 @@ mod ics;
 mod model;
 mod notify;
 mod planner;
-mod sound;
 mod splash;
 mod tasks;
 mod theme;
@@ -47,6 +46,10 @@ struct App {
     logo: egui::TextureHandle,
     tray: Option<tray::Tray>,
     ask_minimize: bool,
+    /// Mostra a pergunta "sair ou ir para a bandeja?" ao fechar.
+    ask_close: bool,
+    /// A saída já foi confirmada: o pedido de fechar passa direto.
+    quitting: bool,
     settings: Settings,
     scale_dirty: bool,
     /// Etapa da volta da bandeja com esmaecer (0 = nenhuma).
@@ -62,14 +65,16 @@ impl App {
         cc.egui_ctx.set_zoom_factor(settings.scale);
         notify::start();
         let store = Store::load();
-        let today = store.today_titles(Local::now().date_naive());
+        let day = Local::now().date_naive();
+        let today = store.today_titles(day);
+        let behind = store.pending_before(day);
         let logo = cc.egui_ctx.load_texture(
             "navi",
             egui::ColorImage::from_rgba_unmultiplied([64, 64], include_bytes!("../assets/icon64.rgba")),
             egui::TextureOptions::LINEAR,
         );
         Self {
-            splash: Some(Splash::new(today)),
+            splash: Some(Splash::new(today, behind)),
             tab: Tab::Tarefas,
             store,
             tasks: TasksView::new(),
@@ -80,6 +85,8 @@ impl App {
             logo,
             tray: None,
             ask_minimize: false,
+            ask_close: false,
+            quitting: false,
             settings,
             scale_dirty: false,
             restore_stage: 0,
@@ -227,6 +234,53 @@ impl App {
         }
     }
 
+    /// Encerra o app de verdade (sem passar pela pergunta).
+    fn quit(&mut self, ctx: &egui::Context) {
+        self.quitting = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    fn close_dialog(&mut self, ctx: &egui::Context) {
+        enum Choice {
+            Quit,
+            Tray,
+            Cancel,
+        }
+        let mut choice = None;
+        egui::Window::new("Fechar o Navi")
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Quer mesmo sair?");
+                ui.weak("Saindo, o Coach para de rastrear e os avisos de tarefas deixam de tocar.");
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Sair").clicked() {
+                        choice = Some(Choice::Quit);
+                    }
+                    if ui.button("Ir para a bandeja").clicked() {
+                        choice = Some(Choice::Tray);
+                    }
+                    if ui.add(egui::Button::new("Cancelar").frame(false)).clicked() {
+                        choice = Some(Choice::Cancel);
+                    }
+                });
+            });
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            choice = Some(Choice::Cancel);
+        }
+        match choice {
+            Some(Choice::Quit) => self.quit(ctx),
+            Some(Choice::Tray) => {
+                self.ask_close = false;
+                self.minimize_to(ctx, true);
+            }
+            Some(Choice::Cancel) => self.ask_close = false,
+            None => {}
+        }
+    }
+
     fn minimize_dialog(&mut self, ctx: &egui::Context) {
         let mut choice = None;
         egui::Window::new("Minimizar o Navi")
@@ -285,7 +339,7 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(8.0);
                     if chrome::window_button(ui, chrome::Glyph::Close).clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        self.ask_close = true;
                     }
                     let g = if maximized { chrome::Glyph::Restore } else { chrome::Glyph::Maximize };
                     if chrome::window_button(ui, g).clicked() {
@@ -342,8 +396,13 @@ impl eframe::App for App {
 
         match tray::take_request() {
             Some(tray::Request::Restore) => self.restore(ui.ctx()),
-            Some(tray::Request::Quit) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
+            Some(tray::Request::Quit) => self.quit(&ctx),
             None => {}
+        }
+        // Alt+F4 e afins também passam pela pergunta (menos quando a saída já foi confirmada).
+        if !self.quitting && ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.ask_close = true;
         }
 
         self.title_bar(ui, maximized);
@@ -376,6 +435,10 @@ impl eframe::App for App {
         if self.ask_minimize {
             let ctx = ui.ctx().clone();
             self.minimize_dialog(&ctx);
+        }
+        if self.ask_close {
+            let ctx = ui.ctx().clone();
+            self.close_dialog(&ctx);
         }
 
         if self.store.dirty {

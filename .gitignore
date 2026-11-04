@@ -1,3 +1,6 @@
 ﻿/target
 /dist
 
+
+# sons gerados por tools/Sons.cs (para revisar; entram no app depois de escolhidos)
+assets/sons/

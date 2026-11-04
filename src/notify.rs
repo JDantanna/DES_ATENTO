@@ -47,7 +47,6 @@ fn icon_path() -> std::path::PathBuf {
 #[cfg(windows)]
 pub fn toast(title: &str, body: &str) {
     use std::os::windows::process::CommandExt;
-    crate::sound::notification();
     let _ = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", TOAST])
         .env("DA_TITLE", title)

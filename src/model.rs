@@ -351,6 +351,11 @@ impl Store {
         }
     }
 
+    /// Quantas tarefas de dias anteriores seguem pendentes (as que também caem hoje já estão na lista de hoje).
+    pub fn pending_before(&self, today: NaiveDate) -> usize {
+        self.tasks.iter().filter(|t| !t.done && t.date.is_some_and(|d| d < today) && !t.occurs_on(today)).count()
+    }
+
     /// Títulos das tarefas pendentes de hoje, em ordem de horário.
     pub fn today_titles(&self, today: NaiveDate) -> Vec<String> {
         let mut v: Vec<&Task> = self.tasks.iter().filter(|t| !t.done && t.occurs_on(today)).collect();
