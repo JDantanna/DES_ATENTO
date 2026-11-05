@@ -18,6 +18,7 @@ jobs:
         # Em caso de falha, repete os erros como anotações, legíveis sem baixar o log inteiro.
         run: |
           $ErrorActionPreference = 'Continue'
+          $env:CARGO_TERM_COLOR = 'never'
           cargo test --release *>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath saida.txt
           $code = $LASTEXITCODE
           if ($code -ne 0) {
