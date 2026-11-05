@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 
 /// Pasta de dados do app (`%APPDATA%\Navi`). Migra a antiga `Des_Atento` na primeira execução.
 pub fn data_dir() -> PathBuf {
+    // Os testes nunca tocam nos dados de verdade de quem os roda.
+    if cfg!(test) {
+        return std::env::temp_dir().join("navi_testes");
+    }
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     let new = base.join("Navi");
     let old = base.join("Des_Atento");

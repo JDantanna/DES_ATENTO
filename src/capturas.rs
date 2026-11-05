@@ -68,12 +68,6 @@ fn input(size: egui::Vec2, time: f64) -> egui::RawInput {
     }
 }
 
-/// Os dados de exemplo nunca podem tocar nas tarefas de verdade de quem roda o teste.
-fn isolate_data() {
-    // SAFETY: nenhum outro teste depende de APPDATA, e o acesso às variáveis de ambiente passa pela mesma trava da biblioteca padrão.
-    unsafe { std::env::set_var("APPDATA", std::env::temp_dir().join("navi_capturas")) };
-}
-
 fn frame(app: &mut App, ctx: &egui::Context, atlas: &mut Atlas, size: egui::Vec2, time: f64) -> egui::FullOutput {
     let out = ctx.run_ui(input(size, time), |ui| app.root(ui));
     for (id, deltas) in &out.textures_delta.set {
@@ -164,7 +158,6 @@ fn capture(app: &mut App, ctx: &egui::Context, atlas: &mut Atlas, name: &str, w:
 
 #[test]
 fn widget_abre_ao_minimizar_e_fecha_ao_voltar() {
-    isolate_data();
     let ctx = egui::Context::default();
     let mut store = sample().0;
     store.dirty = false;
@@ -194,7 +187,6 @@ fn telas_em_todos_os_tamanhos() {
     if let Some(dir) = std::env::var_os("NAVI_CAPTURAS") {
         std::fs::create_dir_all(dir).expect("criar a pasta das capturas");
     }
-    isolate_data();
     let mut clock = 10.0;
     for (w, h) in [(1280, 780), (1000, 640), (760, 560), (480, 420)] {
         let ctx = egui::Context::default();
