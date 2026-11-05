@@ -82,6 +82,9 @@ pub struct Task {
     pub time: Option<NaiveTime>,
     /// Minutos de antecedência do aviso (0 = no horário). `None` = sem aviso.
     pub notify: Option<u32>,
+    /// Avisar também no dia anterior (na mesma hora, ou às 9h se a tarefa não tem hora).
+    #[serde(default)]
+    pub notify_day_before: bool,
     pub tags: Vec<String>,
     pub color: [u8; 3],
     #[serde(default)]
@@ -234,6 +237,7 @@ impl Store {
             date,
             time: None,
             notify: None,
+            notify_day_before: false,
             tags: Vec::new(),
             color: [110, 142, 251],
             repeat: Repeat::None,

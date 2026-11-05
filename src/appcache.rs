@@ -9,12 +9,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::tracker::Icon;
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Clone)]
+#[serde(default)]
 pub struct Cache {
     /// Caminho do executável -> nome do produto.
     pub names: HashMap<String, String>,
-    /// Nome exibido -> chave do ícone (caminho do executável ou `site:dominio`).
+    /// Nome exibido -> chave do ícone (caminho do executável, `site:dominio` ou `custom:...`).
     pub icon_of: HashMap<String, String>,
+    /// Nome detectado -> nome que o usuário escolheu.
+    pub aliases: HashMap<String, String>,
+    /// Programas com ícone escolhido pelo usuário: nome exibido -> chave do ícone que havia antes.
+    pub custom_icons: HashMap<String, String>,
 }
 
 fn dir() -> PathBuf {
@@ -56,6 +61,17 @@ pub fn load_icon(key: &str) -> Option<Icon> {
 pub fn save_icon(icon: &Icon) {
     let _ = std::fs::create_dir_all(dir());
     let _ = image::save_buffer(icon_file(&icon.key), &icon.rgba, icon.w as u32, icon.h as u32, image::ColorType::Rgba8);
+}
+
+/// Lê uma imagem escolhida pelo usuário (PNG, JPG, ICO ou BMP) como ícone de até 64 px.
+pub fn icon_from_file(path: &std::path::Path, key: String) -> Result<Icon, String> {
+    let img = image::open(path).map_err(|e| e.to_string())?.thumbnail(64, 64).into_rgba8();
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    Ok(Icon { key, w, h, rgba: img.into_raw() })
+}
+
+pub fn remove_icon(key: &str) {
+    let _ = std::fs::remove_file(icon_file(key));
 }
 
 #[cfg(test)]

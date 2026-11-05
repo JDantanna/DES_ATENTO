@@ -7,12 +7,14 @@ use std::collections::HashSet;
 use std::process::Command;
 use std::time::Duration;
 
-use chrono::{Duration as Dur, Local};
+use chrono::{Duration as Dur, Local, NaiveDateTime, NaiveTime};
 
-use crate::model::Store;
+use crate::model::{Store, Task};
 
 /// Janela em que um aviso ainda é disparado depois da hora (cobre suspensão/atrasos).
 const GRACE_MIN: i64 = 3;
+/// Hora do aviso do dia anterior para tarefas sem hora marcada.
+const DAY_BEFORE_HOUR: u32 = 9;
 
 /// Identidade do app nas notificações: registra um AppUserModelID próprio ("Navi" + ícone),
 /// em vez de aparecer como "Windows PowerShell".
@@ -55,6 +57,32 @@ pub fn toast(title: &str, body: &str) {
         .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
         .spawn();
 }
+
+/// Avisos programados de uma tarefa: quando disparar e o texto.
+fn notices(t: &Task) -> Vec<(NaiveDateTime, String)> {
+    let mut out = Vec::new();
+    let Some(date) = t.date else { return out };
+    if let (Some(time), Some(min)) = (t.time, t.notify) {
+        let body = if min == 0 {
+            format!("Agora, às {}", time.format("%H:%M"))
+        } else {
+            format!("Em {min} min, às {}", time.format("%H:%M"))
+        };
+        out.push((date.and_time(time) - Dur::minutes(min as i64), body));
+    }
+    if t.notify_day_before {
+        let at = t.time.or(NaiveTime::from_hms_opt(DAY_BEFORE_HOUR, 0, 0));
+        if let Some(at) = at {
+            let body = match t.time {
+                Some(h) => format!("Amanhã, às {}", h.format("%H:%M")),
+                None => "Amanhã".to_owned(),
+            };
+            out.push(((date - Dur::days(1)).and_time(at), body));
+        }
+    }
+    out
+}
+
 pub fn start() {
     std::thread::spawn(|| {
         let mut fired: HashSet<(u64, i64)> = HashSet::new();
@@ -68,23 +96,44 @@ pub fn start() {
                 store = Store::load();
             }
             for t in store.tasks.iter().filter(|t| !t.done) {
-                let (Some(date), Some(time), Some(min)) = (t.date, t.time, t.notify) else {
-                    continue;
-                };
-                let due = date.and_time(time) - Dur::minutes(min as i64);
-                if now >= due
-                    && now < due + Dur::minutes(GRACE_MIN)
-                    && fired.insert((t.id, due.and_utc().timestamp()))
-                {
-                    let body = if min == 0 {
-                        format!("Agora, às {}", time.format("%H:%M"))
-                    } else {
-                        format!("Em {min} min, às {}", time.format("%H:%M"))
-                    };
-                    toast(&t.title, &body);
+                for (due, body) in notices(t) {
+                    if now >= due
+                        && now < due + Dur::minutes(GRACE_MIN)
+                        && fired.insert((t.id, due.and_utc().timestamp()))
+                    {
+                        toast(&t.title, &body);
+                    }
                 }
             }
             std::thread::sleep(Duration::from_secs(20));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    #[test]
+    fn aviso_no_dia_anterior() {
+        let mut s = Store::default();
+        let id = s.add("Prova".into(), NaiveDate::from_ymd_opt(2026, 5, 10));
+        let t = s.tasks.iter_mut().find(|t| t.id == id).unwrap();
+        assert!(notices(t).is_empty());
+
+        t.notify_day_before = true;
+        let n = notices(t);
+        assert_eq!(n[0].0, NaiveDate::from_ymd_opt(2026, 5, 9).unwrap().and_hms_opt(9, 0, 0).unwrap());
+        assert_eq!(n[0].1, "Amanhã");
+
+        // Com hora marcada, vale a mesma hora e o aviso normal continua existindo.
+        t.time = NaiveTime::from_hms_opt(15, 30, 0);
+        t.notify = Some(0);
+        let n = notices(t);
+        assert_eq!(n.len(), 2);
+        assert_eq!(n[0].0, NaiveDate::from_ymd_opt(2026, 5, 10).unwrap().and_hms_opt(15, 30, 0).unwrap());
+        assert_eq!(n[1].0, NaiveDate::from_ymd_opt(2026, 5, 9).unwrap().and_hms_opt(15, 30, 0).unwrap());
+        assert_eq!(n[1].1, "Amanhã, às 15:30");
+    }
 }

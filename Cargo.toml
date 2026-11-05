@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
 eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "ico", "bmp"] }
 rfd = { version = "0.17.2", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

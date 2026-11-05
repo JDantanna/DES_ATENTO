@@ -6,7 +6,7 @@ use chrono::{Datelike, Local};
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, vec2};
 
 use crate::theme::{self, ACCENT, BG};
-use crate::tracker::{Icon, Tracker};
+use crate::tracker::{AppRow, Icon, Tracker};
 use crate::chrome::{self, Glyph};
 
 #[derive(PartialEq, Clone, Copy)]
@@ -70,6 +70,12 @@ pub struct CoachView {
     icons: HashMap<String, egui::TextureHandle>,
     /// Cor de fundo escolhida para cada programa (pelo nome exibido).
     colors: AppColors,
+    /// Painel do programa aberto com o botão direito.
+    panel: Option<Panel>,
+    /// Programa cujo ícone será escolhido em seguida, no seletor de arquivo.
+    pending_pick: Option<String>,
+    /// Erro a mostrar no Coach (imagem de ícone que não pôde ser lida).
+    notice: Option<String>,
 }
 
 const ICON: f32 = 20.0;
@@ -131,7 +137,7 @@ fn legend(ui: &mut egui::Ui, max: u64) {
         for ((_, color), label) in BANDS.iter().zip(labels) {
             let (sq, _) = ui.allocate_exact_size(vec2(11.0, 11.0), Sense::hover());
             ui.painter().rect_filled(sq, 3.0, *color);
-            ui.weak(label);
+            ui.label(egui::RichText::new(label).size(12.0).color(DIM));
             ui.add_space(8.0);
         }
     });
@@ -157,36 +163,134 @@ fn save_colors(colors: &AppColors) {
     }
 }
 
-/// Conteúdo do menu de botão direito: escolher (ou tirar) a cor de fundo de um programa.
-fn color_menu(ui: &mut egui::Ui, name: &str, colors: &mut AppColors, changed: &mut bool) {
-    ui.label(egui::RichText::new(format!("Cor de fundo: {name}")).strong());
-    ui.horizontal(|ui| {
-        for c in PRESETS {
-            let (r, resp) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
-            ui.painter().circle_filled(r.center(), 8.0, Color32::from_rgb(c[0], c[1], c[2]));
-            if resp.hovered() {
-                ui.painter().circle_stroke(r.center(), 9.5, Stroke::new(1.5, Color32::WHITE));
-            }
-            if resp.clicked() {
-                colors.insert(name.to_owned(), c);
-                *changed = true;
-                ui.close();
-            }
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.label("Outra cor:");
-        let mut rgb = colors.get(name).copied().unwrap_or([110, 142, 251]);
-        if ui.color_edit_button_srgb(&mut rgb).changed() {
-            colors.insert(name.to_owned(), rgb);
-            *changed = true;
-        }
-    });
-    if colors.contains_key(name) && ui.button("Sem cor").clicked() {
-        colors.remove(name);
-        *changed = true;
-        ui.close();
+const PANEL_TITLE: &str = "Navi · Programa";
+const PANEL_W: f32 = 340.0;
+/// Altura de cada linha de programa no Coach.
+const ROW_H: f32 = 44.0;
+/// Cinza dos textos secundários do Coach, com contraste suficiente sobre o fundo escuro.
+const DIM: Color32 = Color32::from_gray(160);
+
+/// Painel de um programa (nome, ícone, cor), aberto com o botão direito. É uma janela de verdade
+/// porque um menu ficaria cortado dentro da janela pequena do widget.
+struct Panel {
+    /// Nome do programa; vazio quando não há nada rastreado (só o formato do widget aparece).
+    name: String,
+    /// Texto em edição do novo nome.
+    buf: String,
+    /// Aberto pelo widget: mostra também a escolha do formato.
+    from_widget: bool,
+    at: egui::Pos2,
+    /// Seletor de cor livre aberto.
+    picker: bool,
+    /// A janela já recebeu o foco: perdê-lo depois disso a fecha.
+    seen_focus: bool,
+    /// Quadros desde a abertura (a moldura do Windows só pode ser tirada com a janela já criada).
+    frames: u8,
+}
+
+impl Panel {
+    fn new(name: String, from_widget: bool, at: egui::Pos2) -> Self {
+        Self { buf: name.clone(), name, from_widget, at, picker: false, seen_focus: false, frames: 0 }
     }
+
+    fn editable(&self) -> bool {
+        !self.name.is_empty() && self.name != APP_NAME
+    }
+
+    fn height(&self) -> f32 {
+        let mut h = 66.0;
+        if self.editable() {
+            h += 128.0;
+        }
+        if !self.name.is_empty() {
+            h += 92.0;
+        }
+        if self.picker {
+            h += 215.0;
+        }
+        if self.from_widget {
+            h += 62.0;
+        }
+        h
+    }
+}
+
+/// Onde abrir o painel: junto do ponteiro, sem sair da tela.
+fn panel_pos(ui: &egui::Ui) -> egui::Pos2 {
+    ui.input(|i| {
+        let vp = i.viewport();
+        let origin = vp.outer_rect.map_or(egui::Pos2::ZERO, |r| r.min);
+        let p = origin + i.pointer.latest_pos().unwrap_or_default().to_vec2() + vec2(8.0, 8.0);
+        match vp.monitor_size {
+            Some(m) if p.x < m.x && p.y < m.y => egui::pos2(p.x.min(m.x - PANEL_W - 8.0), p.y.min(m.y - 420.0).max(0.0)),
+            _ => p,
+        }
+    })
+}
+
+/// Título pequeno de uma seção do painel.
+fn section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new(title).size(12.0).color(DIM));
+}
+
+/// Linha de um programa: ícone e nome à esquerda, tempo à direita, barra de proporção embaixo.
+fn app_row(ui: &mut egui::Ui, app: &AppRow, tex: Option<egui::TextureId>, max: u64, total: u64, color: Option<[u8; 3]>) -> egui::Response {
+    let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
+    if !ui.is_rect_visible(row) {
+        return resp;
+    }
+    let p = ui.painter();
+    if let Some([r, g, b]) = color {
+        let c = Color32::from_rgb(r, g, b);
+        p.rect_filled(row, 8.0, c.gamma_multiply(0.3));
+        p.rect_filled(egui::Rect::from_min_size(row.min, vec2(3.0, row.height())), 1.5, c);
+    }
+    if resp.hovered() {
+        p.rect_filled(row, 8.0, Color32::from_white_alpha(10));
+    }
+    let inner = row.shrink2(vec2(10.0, 0.0));
+    let icon = egui::Rect::from_min_size(egui::pos2(inner.left(), row.top() + 7.0), vec2(ICON, ICON));
+    match tex {
+        Some(id) => egui::Image::new((id, vec2(ICON, ICON))).paint_at(ui, icon),
+        // Sem ícone: a inicial do nome, para a linha não ficar com um buraco.
+        None => {
+            p.rect_filled(icon, 5.0, Color32::from_white_alpha(18));
+            let letter = app.name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+            p.text(icon.center(), Align2::CENTER_CENTER, letter, FontId::proportional(12.0), DIM);
+        }
+    }
+
+    let strong = ui.visuals().strong_text_color();
+    let line_y = icon.center().y;
+    let time = p.layout_no_wrap(fmt(app.secs), FontId::proportional(14.0), strong);
+    let time_x = inner.right() - time.size().x;
+    let time_h = time.size().y;
+    p.galley(egui::pos2(time_x, line_y - time_h / 2.0), time, strong);
+
+    let share = app.secs as f32 * 100.0 / total.max(1) as f32;
+    let share = if share < 1.0 { "<1%".to_owned() } else { format!("{share:.0}%") };
+    let share = p.layout_no_wrap(share, FontId::proportional(12.0), DIM);
+    let share_x = time_x - 12.0 - share.size().x;
+    let share_h = share.size().y;
+    p.galley(egui::pos2(share_x, line_y - share_h / 2.0), share, DIM);
+
+    let text_x = icon.right() + 10.0;
+    let mut job = egui::text::LayoutJob::simple_singleline(app.name.clone(), FontId::proportional(14.0), strong);
+    job.wrap.max_width = (share_x - 12.0 - text_x).max(20.0);
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    job.wrap.overflow_character = Some('…');
+    let name = p.layout_job(job);
+    let name_h = name.size().y;
+    p.galley(egui::pos2(text_x, line_y - name_h / 2.0), name, strong);
+
+    let track = egui::Rect::from_min_max(egui::pos2(text_x, row.top() + 31.0), egui::pos2(inner.right(), row.top() + 35.0));
+    p.rect_filled(track, 2.0, Color32::from_white_alpha(14));
+    let frac = app.secs as f32 / max.max(1) as f32;
+    let fill = egui::Rect::from_min_size(track.min, vec2((track.width() * frac).max(3.0), track.height()));
+    p.rect_filled(fill, 2.0, band_color(frac));
+    resp
 }
 
 /// Formato curto, para relatório e gráficos: `1h 05m`.
@@ -224,6 +328,9 @@ impl CoachView {
             open_app: false,
             icons: HashMap::new(),
             colors: load_colors(),
+            panel: None,
+            pending_pick: None,
+            notice: None,
         }
     }
 
@@ -247,6 +354,8 @@ impl CoachView {
         let total: u64 = report.per_day.iter().map(|(_, s)| s).sum();
 
         egui::CentralPanel::default().show(ui, |ui| {
+            // Textos não capturam o mouse: o clique e o botão direito valem para a linha inteira.
+            ui.style_mut().interaction.selectable_labels = false;
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.range, Range::Hoje, "Hoje");
                 ui.selectable_value(&mut self.range, Range::Semana, "7 dias");
@@ -263,51 +372,54 @@ impl CoachView {
                     }
                 });
             });
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             self.status_banner(ui, &report.now);
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new(format!("Total: {}", fmt(total))).heading());
-            ui.add_space(8.0);
+            if let Some(notice) = &self.notice {
+                ui.colored_label(Color32::LIGHT_RED, notice);
+            }
+            ui.add_space(10.0);
 
-            if n > 1 {
-                chart(ui, &report.per_day);
-                ui.add_space(10.0);
-            }
-
-            if report.apps.is_empty() {
-                ui.weak("Ainda sem dados. Use outros programas e volte aqui.");
-            }
-            let max = report.apps.first().map(|a| a.secs).unwrap_or(1).max(1);
-            if !report.apps.is_empty() {
-                legend(ui, max);
-                ui.add_space(4.0);
-            }
-            let mut changed = false;
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                // O número principal primeiro; o período e a quantidade de programas em segundo plano.
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(fmt(total)).size(28.0).strong());
+                    let period = match self.range {
+                        Range::Hoje => "hoje",
+                        Range::Semana => "nos últimos 7 dias",
+                        Range::Mes => "nos últimos 30 dias",
+                    };
+                    let count = report.apps.len();
+                    let apps = if count == 1 { "programa" } else { "programas" };
+                    ui.label(egui::RichText::new(format!("{period} · {count} {apps}")).color(DIM));
+                });
+                ui.add_space(8.0);
+
+                if n > 1 {
+                    chart(ui, &report.per_day);
+                    ui.add_space(10.0);
+                }
+
+                if report.apps.is_empty() {
+                    ui.add_space(24.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(egui::RichText::new("Ainda sem dados neste período.").color(DIM));
+                        ui.label(egui::RichText::new("Use outros programas e o tempo aparece aqui.").color(DIM));
+                    });
+                    return;
+                }
+                let max = report.apps.first().map_or(1, |a| a.secs).max(1);
+                legend(ui, max);
+                ui.add_space(6.0);
+                ui.spacing_mut().item_spacing.y = 2.0;
                 for app in &report.apps {
                     let tex = icon_tex(&mut self.icons, ui.ctx(), app.icon.as_ref());
-                    // Fundo na cor escolhida para o programa (botão direito para mudar); a barra mostra o tempo.
-                    let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
-                    if let Some([r, g, b]) = self.colors.get(&app.name) {
-                        ui.painter().rect_filled(row, 6.0, Color32::from_rgb(*r, *g, *b).gamma_multiply(0.5));
+                    let resp = app_row(ui, app, tex, max, total, self.colors.get(&app.name).copied());
+                    if resp.secondary_clicked() {
+                        self.panel = Some(Panel::new(app.name.clone(), false, panel_pos(ui)));
                     }
-                    let bar = band_color(app.secs as f32 / max as f32);
-                    let layout = egui::Layout::left_to_right(egui::Align::Center);
-                    ui.scope_builder(egui::UiBuilder::new().max_rect(row.shrink2(vec2(4.0, 1.0))).layout(layout), |ui| {
-                        app_icon(ui, tex);
-                        ui.add(
-                            egui::ProgressBar::new(app.secs as f32 / max as f32)
-                                .fill(bar.gamma_multiply(0.8))
-                                .desired_width(ui.available_width())
-                                .text(format!("{}   {}", app.name, fmt(app.secs))),
-                        );
-                    });
-                    resp.on_hover_text("Botão direito: cor de fundo").context_menu(|ui| color_menu(ui, &app.name, &mut self.colors, &mut changed));
+                    resp.on_hover_text("Botão direito: renomear, trocar o ícone e escolher a cor");
                 }
             });
-            if changed {
-                save_colors(&self.colors);
-            }
         });
     }
 
@@ -320,7 +432,7 @@ impl CoachView {
             // Pulso suave, em ~10 quadros por segundo, só enquanto esta aba está aberta.
             ui.ctx().request_repaint_after(Duration::from_millis(100));
         }
-        egui::Frame::new()
+        let frame = egui::Frame::new()
             .fill(tint.gamma_multiply(0.12))
             .stroke(Stroke::new(1.0, tint.gamma_multiply(0.45)))
             .corner_radius(8)
@@ -333,20 +445,204 @@ impl CoachView {
                     ui.painter().circle_filled(dot.center(), 5.0 + 3.5 * pulse, tint.gamma_multiply(0.35 * (1.0 - pulse)));
                     ui.painter().circle_filled(dot.center(), 4.5, tint);
                     ui.label(egui::RichText::new(if tracking { "Rastreando" } else { "Pausado" }).strong().color(tint));
-                    if tracking {
-                        let tex = icon_tex(&mut self.icons, ui.ctx(), now.icon.as_ref());
-                        let name = now.current.as_deref().unwrap_or("");
-                        program_icon(ui, name, tex);
-                        ui.label(name);
-                    } else {
-                        ui.weak("sem atividade; o tempo não está sendo contado");
-                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let widget_on = self.widget && !self.closing;
-                        ui.weak(if widget_on { "widget aberto" } else { "widget fechado: o rastreamento continua em segundo plano" });
+                        let text = if widget_on { "widget aberto" } else { "em segundo plano" };
+                        ui.label(egui::RichText::new(text).size(12.0).color(DIM));
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            if tracking {
+                                let tex = icon_tex(&mut self.icons, ui.ctx(), now.icon.as_ref());
+                                let name = now.current.as_deref().unwrap_or("");
+                                program_icon(ui, name, tex);
+                                ui.add(egui::Label::new(name).truncate());
+                            } else {
+                                ui.add(egui::Label::new(egui::RichText::new("sem atividade; o tempo não está sendo contado").color(DIM)).truncate());
+                            }
+                        });
                     });
                 });
             });
+        let area = ui.interact(frame.response.rect, ui.scope_id().with("faixa_status"), Sense::click());
+        if tracking && area.secondary_clicked() {
+            self.panel = Some(Panel::new(now.current.clone().unwrap_or_default(), false, panel_pos(ui)));
+        }
+        area.on_hover_text(if tracking {
+            "O tempo deste programa está sendo contado, com o widget aberto ou não. Botão direito: renomear, ícone e cor."
+        } else {
+            "Sem atividade há alguns minutos: o tempo volta a contar quando você voltar."
+        });
+    }
+
+    /// Janela do painel do programa; deve ser chamada a cada quadro, qualquer que seja a aba.
+    pub fn panel(&mut self, ui: &mut egui::Ui, tracker: &Tracker) {
+        // O seletor de arquivo bloqueia a interface: só abre depois que o painel fechou.
+        if let Some(name) = self.pending_pick.take() {
+            let file = rfd::FileDialog::new()
+                .set_title(format!("Ícone de {name}"))
+                .add_filter("Imagem", &["png", "jpg", "jpeg", "ico", "bmp"])
+                .pick_file();
+            if let Some(path) = file {
+                self.notice = tracker.set_custom_icon(&name, &path).err().map(|e| format!("Não foi possível usar a imagem: {e}"));
+            }
+        }
+        let Some(mut p) = self.panel.take() else { return };
+        let ctx = ui.ctx().clone();
+        let id = egui::ViewportId::from_hash_of("coach_painel_programa");
+        let builder = egui::ViewportBuilder::default()
+            .with_title(PANEL_TITLE)
+            .with_inner_size([PANEL_W, p.height()])
+            .with_position(p.at)
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_always_on_top()
+            .with_resizable(false)
+            .with_taskbar(false)
+            .with_active(true);
+        let mut close = false;
+        let mut rename = None;
+        let mut pick_icon = false;
+        let mut reset_icon = false;
+        let mut set_small = None;
+        let mut colors_changed = false;
+        let small = self.small;
+        let custom = !p.name.is_empty() && tracker.has_custom_icon(&p.name);
+        let colors = &mut self.colors;
+        ctx.show_viewport_immediate(id, builder, |ui, _class| {
+            ui.style_mut().interaction.selectable_labels = false;
+            let full = ui.max_rect();
+            let drag = ui.interact(full, ui.scope_id().with("painel_arrastar"), Sense::click_and_drag());
+            if drag.drag_started() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+            ui.painter().rect_filled(full, chrome::RADIUS, Color32::from_rgb(26, 29, 42));
+            ui.painter().rect_stroke(full, chrome::RADIUS, Stroke::new(1.0, Color32::from_white_alpha(40)), egui::StrokeKind::Inside);
+            // Fecha com Esc ou ao clicar fora, como um menu.
+            match ui.input(|i| i.viewport().focused) {
+                Some(true) => p.seen_focus = true,
+                Some(false) if p.seen_focus => close = true,
+                _ => {}
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                close = true;
+            }
+            egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(14)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        close |= chrome::close_button(ui).clicked();
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            let title = if p.name.is_empty() { "Widget" } else { p.name.as_str() };
+                            ui.add(egui::Label::new(egui::RichText::new(title).strong().size(15.0)).truncate());
+                        });
+                    });
+                });
+                if p.editable() {
+                    section(ui, "Nome");
+                    let name = p.name.clone();
+                    ui.horizontal(|ui| {
+                        let r = ui.add(egui::TextEdit::singleline(&mut p.buf).desired_width(PANEL_W - 120.0));
+                        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let new = p.buf.trim();
+                        let valid = !new.is_empty() && new != name;
+                        if ui.add_enabled(valid, egui::Button::new("Salvar")).clicked() || (enter && valid) {
+                            rename = Some(new.to_owned());
+                        }
+                    });
+                    section(ui, "Ícone");
+                    ui.horizontal(|ui| {
+                        pick_icon |= ui.button("Escolher imagem...").clicked();
+                        if custom {
+                            reset_icon |= ui.button("Usar o original").clicked();
+                        }
+                    });
+                }
+                if !p.name.is_empty() {
+                    section(ui, "Cor de fundo");
+                    let current = colors.get(&p.name).copied();
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        for c in PRESETS {
+                            let (r, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
+                            ui.painter().circle_filled(r.center(), 9.0, Color32::from_rgb(c[0], c[1], c[2]));
+                            if resp.hovered() || current == Some(c) {
+                                ui.painter().circle_stroke(r.center(), 10.5, Stroke::new(1.5, Color32::WHITE));
+                            }
+                            if resp.clicked() {
+                                colors.insert(p.name.clone(), c);
+                                colors_changed = true;
+                            }
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(p.picker, "Outra cor").clicked() {
+                            p.picker = !p.picker;
+                        }
+                        if current.is_some() && ui.button("Sem cor").clicked() {
+                            colors.remove(&p.name);
+                            colors_changed = true;
+                        }
+                    });
+                    if p.picker {
+                        let [r, g, b] = current.unwrap_or([110, 142, 251]);
+                        let mut c = Color32::from_rgb(r, g, b);
+                        if egui::color_picker::color_picker_color32(ui, &mut c, egui::color_picker::Alpha::Opaque) {
+                            colors.insert(p.name.clone(), [c.r(), c.g(), c.b()]);
+                            colors_changed = true;
+                        }
+                    }
+                }
+                if p.from_widget {
+                    section(ui, "Formato do widget");
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(small, "Pequeno").clicked() {
+                            set_small = Some(true);
+                        }
+                        if ui.selectable_label(!small, "Médio").clicked() {
+                            set_small = Some(false);
+                        }
+                    });
+                }
+            });
+        });
+        if colors_changed {
+            save_colors(&self.colors);
+        }
+        if let Some(s) = set_small {
+            self.set_small(s);
+        }
+        if let Some(new) = rename {
+            tracker.rename_app(&p.name, &new);
+            if let Some(c) = self.colors.remove(&p.name) {
+                self.colors.insert(new.clone(), c);
+                save_colors(&self.colors);
+            }
+            p.buf = new.clone();
+            p.name = new;
+        }
+        if reset_icon {
+            tracker.reset_icon(&p.name);
+        }
+        if pick_icon {
+            self.pending_pick = Some(p.name.clone());
+            ctx.request_repaint();
+            return;
+        }
+        // Tira a moldura do Windows assim que a janela existe.
+        p.frames = p.frames.saturating_add(1);
+        if p.frames == 2 {
+            chrome::flatten_window(PANEL_TITLE);
+        }
+        if !close {
+            self.panel = Some(p);
+        }
+    }
+
+    /// Muda o formato do widget, que volta ao tamanho padrão daquele formato.
+    fn set_small(&mut self, small: bool) {
+        if small != self.small {
+            self.small = small;
+            self.format_changed = true;
+            self.widget_w = WIDGET_W;
+        }
     }
 
     /// Janela flutuante; deve ser chamada a cada quadro, qualquer que seja a aba.
@@ -421,8 +717,7 @@ impl CoachView {
         let tracked_name = if tracking { data.now.current.clone() } else { None };
         // Cor de fundo escolhida para o programa em uso (botão direito no widget ou no Coach).
         let program = tracked_name.as_deref().and_then(|n| self.colors.get(n)).copied();
-        let mut colors = std::mem::take(&mut self.colors);
-        let mut colors_changed = false;
+        let mut open_panel = None;
         let (fill, time_color) = if tracking {
             (program.map_or(BG, |[r, g, b]| BG.lerp_to_gamma(Color32::from_rgb(r, g, b), 0.5)), ACCENT)
         } else {
@@ -454,26 +749,9 @@ impl CoachView {
             if drag.double_clicked() {
                 open_app = true;
             }
-            drag.context_menu(|ui| {
-                ui.label(egui::RichText::new("Formato do widget").strong());
-                ui.horizontal(|ui| {
-                    if ui.selectable_label(small, "Pequeno").clicked() {
-                        set_small = Some(true);
-                        ui.close();
-                    }
-                    if ui.selectable_label(!small, "Médio").clicked() {
-                        set_small = Some(false);
-                        ui.close();
-                    }
-                });
-                ui.separator();
-                match &tracked_name {
-                    Some(n) => color_menu(ui, n, &mut colors, &mut colors_changed),
-                    None => {
-                        ui.weak("Nada sendo rastreado agora.");
-                    }
-                }
-            });
+            if drag.secondary_clicked() {
+                open_panel = Some(panel_pos(ui));
+            }
             // A fonte do relógio acompanha o tamanho da janela.
             let k = (full.width() / WIDGET_W).clamp(0.7, 2.4);
             let time_text = |size: f32| egui::RichText::new(clock(data.app_secs)).monospace().strong().size(size).color(time_color);
@@ -529,10 +807,12 @@ impl CoachView {
                         }
                         for (row, tex) in data.session.iter().zip(&rows_tex) {
                             ui.horizontal(|ui| {
-                                app_icon(ui, *tex);
-                                ui.add(egui::Label::new(egui::RichText::new(&row.name).strong()).truncate());
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     ui.weak(clock(row.secs));
+                                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                        app_icon(ui, *tex);
+                                        ui.add(egui::Label::new(egui::RichText::new(&row.name).strong()).truncate());
+                                    });
                                 });
                             });
                         }
@@ -540,18 +820,11 @@ impl CoachView {
                 }
             });
         });
-        self.colors = colors;
-        if colors_changed {
-            save_colors(&self.colors);
-        }
         if let Some(s) = size {
             self.widget_w = s.x.max(MIN_W);
         }
-        // Cada formato volta ao seu tamanho padrão.
-        if let Some(s) = set_small.filter(|s| *s != self.small) {
-            self.small = s;
-            self.format_changed = true;
-            self.widget_w = WIDGET_W;
+        if let Some(s) = set_small {
+            self.set_small(s);
         }
         // A janela só existe a partir do primeiro quadro; então tira a moldura quadrada do Windows.
         if !first && !self.frame_fixed {
@@ -559,6 +832,9 @@ impl CoachView {
         }
         if toggle_list {
             self.widget_list = !self.widget_list;
+        }
+        if let Some(at) = open_panel {
+            self.panel = Some(Panel::new(tracked_name.unwrap_or_default(), true, at));
         }
         if open_app {
             self.open_app = true;
@@ -593,8 +869,8 @@ fn chart(ui: &mut egui::Ui, days: &[(chrono::NaiveDate, u64)]) {
                 egui::pos2(x + slot / 2.0, rect.max.y - 7.0),
                 Align2::CENTER_CENTER,
                 format!("{:02}/{:02}", d.day(), d.month()),
-                FontId::proportional(10.0),
-                Color32::GRAY,
+                FontId::proportional(11.0),
+                DIM,
             );
         }
         if *s > 0 && days.len() <= 8 {
@@ -602,8 +878,8 @@ fn chart(ui: &mut egui::Ui, days: &[(chrono::NaiveDate, u64)]) {
                 egui::pos2(x + slot / 2.0, bar.min.y - 7.0),
                 Align2::CENTER_CENTER,
                 fmt(*s),
-                FontId::proportional(10.0),
-                Color32::LIGHT_GRAY,
+                FontId::proportional(11.0),
+                Color32::from_gray(210),
             );
         }
     }

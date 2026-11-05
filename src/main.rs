@@ -4,6 +4,7 @@ mod appcache;
 mod appname;
 mod chrome;
 mod coach;
+mod datepicker;
 mod fairy;
 mod ics;
 mod model;
@@ -417,6 +418,7 @@ impl eframe::App for App {
         }
 
         self.coach.floating(ui, &self.tracker);
+        self.coach.panel(ui, &self.tracker);
         if self.coach.take_opened() {
             let ctx = ui.ctx().clone();
             self.go_tray(&ctx);

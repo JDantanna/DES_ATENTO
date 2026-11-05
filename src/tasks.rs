@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use chrono::{Local, NaiveDate, NaiveTime};
+use chrono::{Datelike, Local, NaiveDate, NaiveTime};
 use eframe::egui::{self, Color32, RichText};
 
+use crate::datepicker;
 use crate::ics;
 use crate::chrome::{self, Glyph};
 use crate::model::{Repeat, Store, Subtask, Task, tag_rgb};
@@ -65,6 +66,8 @@ pub struct TasksView {
     chip_rects: Vec<egui::Rect>,
     /// Tarefa cuja linha está sendo arrastada para mudar a ordem.
     row_drag: Option<u64>,
+    /// Mês mostrado no calendário em popup da data (`None` = fechado).
+    cal_month: Option<NaiveDate>,
     /// Tarefas com as informações recolhidas no rodapé da linha (por padrão ficam abertas).
     collapsed: HashSet<u64>,
     /// Texto em edição de cada tag no painel de tags.
@@ -87,6 +90,7 @@ impl TasksView {
             tags_open: false,
             chip_rects: Vec::new(),
             row_drag: None,
+            cal_month: None,
             collapsed: HashSet::new(),
             tag_edit: HashMap::new(),
         }
@@ -102,7 +106,7 @@ impl TasksView {
     pub fn show(&mut self, ui: &mut egui::Ui, store: &mut Store) {
         // O editor só existe enquanto há uma tarefa sendo criada ou editada; Esc fecha.
         let editing = self.selected.is_some();
-        if editing && ui.input(|i| i.key_pressed(egui::Key::Escape)) && ui.memory(|m| m.focused().is_none()) {
+        if editing && self.cal_month.is_none() && ui.input(|i| i.key_pressed(egui::Key::Escape)) && ui.memory(|m| m.focused().is_none()) {
             self.selected = None;
         }
         if self.selected.is_some() {
@@ -463,6 +467,10 @@ impl TasksView {
             self.time_buf = t.time.map(|h| h.format("%H:%M").to_string()).unwrap_or_default();
             self.tag_buf.clear();
             self.sub_buf.clear();
+            self.cal_month = None;
+        } else if parse_date(&self.date_buf).is_some() && parse_date(&self.date_buf) != t.date {
+            // A data mudou fora da caixa (concluir uma recorrente, arrastar no calendário).
+            self.date_buf = t.date.map(|d| d.format("%d/%m/%Y").to_string()).unwrap_or_default();
         }
     }
 
@@ -506,18 +514,65 @@ impl TasksView {
 
             ui.label("Data e hora");
             ui.horizontal(|ui| {
-                let parsed = NaiveDate::parse_from_str(self.date_buf.trim(), "%d/%m/%Y").ok();
-                let bad = !self.date_buf.trim().is_empty() && parsed.is_none();
+                let date_id = ui.scope_id().with("caixa_data");
+                // Vermelho só com a data inteira digitada, ou ao sair da caixa: durante a digitação ela ainda está incompleta.
+                let typing = ui.memory(|m| m.has_focus(date_id)) && self.date_buf.len() < 10;
+                let bad = !self.date_buf.is_empty() && !typing && parse_date(&self.date_buf).is_none();
                 let r = ui.add(
                     egui::TextEdit::singleline(&mut self.date_buf)
+                        .id(date_id)
                         .hint_text("dd/mm/aaaa")
                         .desired_width(100.0)
                         .text_color_opt(bad.then_some(Color32::LIGHT_RED)),
-                );
-                if r.changed() && (parsed.is_some() || self.date_buf.trim().is_empty()) {
-                    t.date = parsed;
-                    t.set_anchor();
-                    changed = true;
+                )
+                .on_hover_text("Digite só os números, ou escolha no calendário");
+                if r.clicked() {
+                    self.cal_month = Some(t.date.unwrap_or(today).with_day(1).unwrap_or(today));
+                }
+                if r.changed() {
+                    let digits: String = self.date_buf.chars().filter(char::is_ascii_digit).take(8).collect();
+                    let masked = format_date_digits(&digits);
+                    if masked != self.date_buf {
+                        self.date_buf = masked;
+                        cursor_to_end(ui.ctx(), date_id, &self.date_buf);
+                    }
+                    let parsed = parse_date(&self.date_buf);
+                    if parsed.is_some() || self.date_buf.is_empty() {
+                        t.date = parsed;
+                        t.set_anchor();
+                        changed = true;
+                    }
+                }
+                // "05/11" ou "05/11/26": ao sair da caixa, completa o ano.
+                if r.lost_focus() {
+                    if let Some(d) = complete_date(&self.date_buf, today) {
+                        self.date_buf = d.format("%d/%m/%Y").to_string();
+                        t.date = Some(d);
+                        t.set_anchor();
+                        changed = true;
+                    }
+                }
+                if let Some(mut month) = self.cal_month {
+                    let id = ui.scope_id().with("calendario");
+                    let outcome = datepicker::show(ui.ctx(), id, r.rect, &mut month, t.date, today);
+                    self.cal_month = Some(month);
+                    match outcome {
+                        datepicker::Outcome::Open => {}
+                        datepicker::Outcome::Close => self.cal_month = None,
+                        datepicker::Outcome::Clear => {
+                            t.date = None;
+                            self.date_buf.clear();
+                            self.cal_month = None;
+                            changed = true;
+                        }
+                        datepicker::Outcome::Pick(d) => {
+                            t.date = Some(d);
+                            t.set_anchor();
+                            self.date_buf = d.format("%d/%m/%Y").to_string();
+                            self.cal_month = None;
+                            changed = true;
+                        }
+                    }
                 }
                 if ui.small_button("Hoje").clicked() {
                     t.date = Some(today);
@@ -525,16 +580,23 @@ impl TasksView {
                     self.date_buf = today.format("%d/%m/%Y").to_string();
                     changed = true;
                 }
-                let bad = !self.time_buf.is_empty() && NaiveTime::parse_from_str(&self.time_buf, "%H:%M").is_err();
+                let time_id = ui.scope_id().with("caixa_hora");
+                let typing = ui.memory(|m| m.has_focus(time_id)) && self.time_buf.len() < 5;
+                let bad = !self.time_buf.is_empty() && !typing && NaiveTime::parse_from_str(&self.time_buf, "%H:%M").is_err();
                 let r = ui.add(
                     egui::TextEdit::singleline(&mut self.time_buf)
+                        .id(time_id)
                         .hint_text("HH:MM (24h)")
                         .desired_width(90.0)
                         .text_color_opt(bad.then_some(Color32::LIGHT_RED)),
                 );
                 if r.changed() {
                     let digits: String = self.time_buf.chars().filter(char::is_ascii_digit).take(4).collect();
-                    self.time_buf = format_time_digits(&digits);
+                    let masked = format_time_digits(&digits);
+                    if masked != self.time_buf {
+                        self.time_buf = masked;
+                        cursor_to_end(ui.ctx(), time_id, &self.time_buf);
+                    }
                     let parsed = NaiveTime::parse_from_str(&self.time_buf, "%H:%M").ok();
                     if parsed.is_some() || self.time_buf.is_empty() {
                         t.time = parsed;
@@ -558,7 +620,11 @@ impl TasksView {
                         changed |= ui.selectable_value(&mut t.notify, Some(m), format!("{m} min antes")).changed();
                     }
                 });
-                if t.notify.is_some() && (t.date.is_none() || t.time.is_none()) {
+                changed |= ui
+                    .checkbox(&mut t.notify_day_before, "Também no dia anterior")
+                    .on_hover_text("Na mesma hora, um dia antes. Sem hora marcada, avisa às 9h.")
+                    .changed();
+                if (t.notify.is_some() && (t.date.is_none() || t.time.is_none())) || (t.notify_day_before && t.date.is_none()) {
                     ui.weak("defina data e hora");
                 }
             });
@@ -702,6 +768,67 @@ impl TasksView {
     }
 }
 
+/// Depois de reformatar o texto da caixa, o cursor volta para o fim (a máscara acrescenta caracteres).
+fn cursor_to_end(ctx: &egui::Context, id: egui::Id, text: &str) {
+    if let Some(mut state) = egui::TextEdit::load_state(ctx, id) {
+        let end = egui::text::CCursor::new(text.chars().count());
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
+        egui::TextEdit::store_state(ctx, id, state);
+    }
+}
+
+fn parse_date(text: &str) -> Option<NaiveDate> {
+    // Exige os 10 caracteres: o chrono aceitaria "05/11/2" como o ano 2.
+    if text.len() != 10 {
+        return None;
+    }
+    NaiveDate::parse_from_str(text, "%d/%m/%Y").ok()
+}
+
+/// Completa uma data curta: "05/11" fica no ano atual e "05/11/26" vira 2026.
+fn complete_date(text: &str, today: NaiveDate) -> Option<NaiveDate> {
+    let digits: String = text.chars().filter(char::is_ascii_digit).collect();
+    if text.len() == 10 || digits.len() < 4 {
+        return None;
+    }
+    let day = digits[..2].parse().ok()?;
+    let month = digits[2..4].parse().ok()?;
+    let year = match digits.len() {
+        4 => today.year(),
+        6 => 2000 + digits[4..6].parse::<i32>().ok()?,
+        _ => return None,
+    };
+    NaiveDate::from_ymd_opt(year, month, day)
+}
+
+/// Máscara de data: só dígitos, dia e mês dentro do possível, e as barras nos lugares certos.
+fn format_date_digits(digits: &str) -> String {
+    let mut d: Vec<char> = digits.chars().collect();
+    // Um dia que não pode ter dois dígitos ganha o zero na frente: "5" vira "05".
+    if d.first().is_some_and(|c| *c > '3') {
+        d.insert(0, '0');
+    }
+    if d.len() >= 2 && d[0] == '3' && d[1] > '1' {
+        d[1] = '1';
+    }
+    // O mesmo para o mês: "5" vira "05", e acima de 12 fica em 12.
+    if d.len() >= 3 && d[2] > '1' {
+        d.insert(2, '0');
+    }
+    if d.len() >= 4 && d[2] == '1' && d[3] > '2' {
+        d[3] = '2';
+    }
+    d.truncate(8);
+    let mut out = String::with_capacity(10);
+    for (i, c) in d.iter().enumerate() {
+        if i == 2 || i == 4 {
+            out.push('/');
+        }
+        out.push(*c);
+    }
+    out
+}
+
 /// Máscara de hora 24h: só dígitos, completa o zero à esquerda e põe os dois pontos.
 fn format_time_digits(digits: &str) -> String {
     let mut d: Vec<char> = digits.chars().collect();
@@ -717,4 +844,33 @@ fn format_time_digits(digits: &str) -> String {
     d.truncate(4);
     let s: String = d.iter().collect();
     if s.len() > 2 { format!("{}:{}", &s[..2], &s[2..]) } else { s }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mascara_de_data() {
+        assert_eq!(format_date_digits("0"), "0");
+        assert_eq!(format_date_digits("05"), "05");
+        assert_eq!(format_date_digits("051"), "05/1");
+        assert_eq!(format_date_digits("0511"), "05/11");
+        assert_eq!(format_date_digits("05112026"), "05/11/2026");
+        assert_eq!(format_date_digits("5"), "05");
+        assert_eq!(format_date_digits("0531"), "05/03/1");
+        assert_eq!(format_date_digits("3911"), "31/11");
+        assert_eq!(format_date_digits("0519"), "05/12");
+    }
+
+    #[test]
+    fn data_curta_completa_o_ano() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 4).unwrap();
+        assert_eq!(complete_date("05/11", today), NaiveDate::from_ymd_opt(2026, 11, 5));
+        assert_eq!(complete_date("05/11/27", today), NaiveDate::from_ymd_opt(2027, 11, 5));
+        assert_eq!(complete_date("05/1", today), None);
+        assert_eq!(complete_date("31/02", today), None);
+        assert_eq!(parse_date("05/11/2"), None);
+        assert_eq!(parse_date("05/11/2026"), NaiveDate::from_ymd_opt(2026, 11, 5));
+    }
 }

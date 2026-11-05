@@ -50,18 +50,50 @@ struct Shared {
     session: BTreeMap<String, u64>,
     current: Option<String>,
     idle: bool,
-    /// Ícones por caminho do executável, e de qual executável vem cada nome exibido.
+    /// Ícones carregados, pela chave (caminho do executável, `site:dominio` ou `custom:...`).
     icons: HashMap<String, Arc<Icon>>,
-    icon_of: HashMap<String, String>,
+    /// O que fica guardado em disco: nomes, apelidos e de onde vem o ícone de cada programa.
+    cache: Cache,
+    cache_dirty: bool,
 }
 
 impl Shared {
     fn icon(&self, name: &str) -> Option<Arc<Icon>> {
-        self.icon_of.get(name).and_then(|p| self.icons.get(p)).cloned()
+        self.cache.icon_of.get(name).and_then(|p| self.icons.get(p)).cloned()
     }
 
     fn row(&self, name: &str, secs: u64) -> AppRow {
         AppRow { name: name.to_owned(), secs, icon: self.icon(name) }
+    }
+
+    /// Passa o programa a se chamar `to` para sempre: o histórico, a sessão e o ícone vão junto.
+    /// Se já existe um programa com esse nome, os tempos se somam.
+    fn rename(&mut self, from: &str, to: &str) {
+        for v in self.cache.aliases.values_mut() {
+            if v == from {
+                *v = to.to_owned();
+            }
+        }
+        self.cache.aliases.insert(from.to_owned(), to.to_owned());
+        self.cache.aliases.retain(|k, v| k != v);
+        for apps in self.usage.days.values_mut() {
+            if let Some(secs) = apps.remove(from) {
+                *apps.entry(to.to_owned()).or_default() += secs;
+            }
+        }
+        if let Some(secs) = self.session.remove(from) {
+            *self.session.entry(to.to_owned()).or_default() += secs;
+        }
+        if let Some(key) = self.cache.icon_of.remove(from) {
+            self.cache.icon_of.entry(to.to_owned()).or_insert(key);
+        }
+        if let Some(prev) = self.cache.custom_icons.remove(from) {
+            self.cache.custom_icons.insert(to.to_owned(), prev);
+        }
+        if self.current.as_deref() == Some(from) {
+            self.current = Some(to.to_owned());
+        }
+        self.cache_dirty = true;
     }
 }
 
@@ -121,21 +153,17 @@ impl Tracker {
         let mut usage: Usage =
             std::fs::read_to_string(path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         usage.tidy();
-        let mut cache = Cache::load();
-        let shared = Arc::new(Mutex::new(Shared { usage, icon_of: cache.icon_of.clone(), ..Default::default() }));
+        let cache = Cache::load();
+        // Ícones guardados em execuções anteriores: lidos do disco uma vez, sem consultar o sistema nem a internet.
+        let saved_keys: HashSet<String> = cache.icon_of.values().chain(cache.custom_icons.values()).cloned().collect();
+        let shared = Arc::new(Mutex::new(Shared { usage, cache, ..Default::default() }));
         let worker = Arc::clone(&shared);
         std::thread::spawn(move || {
             let me = std::env::current_exe()
                 .ok()
                 .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
-            // Ícones guardados em execuções anteriores: lidos do disco uma vez, sem consultar o sistema nem a internet.
-            let saved: Vec<_> = cache
-                .icon_of
-                .values()
-                .collect::<HashSet<_>>()
-                .into_iter()
-                .filter_map(|k| appcache::load_icon(k).map(|i| (k.clone(), Arc::new(i))))
-                .collect();
+            let saved: Vec<_> =
+                saved_keys.into_iter().filter_map(|k| appcache::load_icon(&k).map(|i| (k, Arc::new(i)))).collect();
             worker.lock().unwrap().icons.extend(saved);
 
             let mut ticks = 0u32;
@@ -143,7 +171,6 @@ impl Tracker {
             let mut icon_tried: HashSet<String> = HashSet::new();
             let mut names_tried: HashSet<String> = HashSet::new();
             let mut sites_tried: HashSet<&'static str> = HashSet::new();
-            let mut cache_dirty = false;
             loop {
                 std::thread::sleep(Duration::from_secs(1));
                 let idle = sys::idle_secs() >= IDLE_SECS;
@@ -151,22 +178,25 @@ impl Tracker {
                 let site = fg.as_ref().and_then(|f| appname::site_domain(&f.exe, &f.title));
                 let name = fg.as_ref().map(|f| {
                     let product = if appname::needs_product(&f.exe) {
-                        match cache.names.get(&f.path) {
-                            Some(n) => Some(n.clone()),
-                            None if names_tried.insert(f.path.clone()) => {
-                                let p = appname::product_name(&f.path);
-                                if let Some(p) = &p {
-                                    cache.names.insert(f.path.clone(), p.clone());
-                                    cache_dirty = true;
-                                }
-                                p
+                        let known = worker.lock().unwrap().cache.names.get(&f.path).cloned();
+                        known.or_else(|| {
+                            if !names_tried.insert(f.path.clone()) {
+                                return None;
                             }
-                            None => None,
-                        }
+                            // Ler o recurso de versão é lento: fica fora da trava.
+                            let p = appname::product_name(&f.path)?;
+                            let mut s = worker.lock().unwrap();
+                            s.cache.names.insert(f.path.clone(), p.clone());
+                            s.cache_dirty = true;
+                            Some(p)
+                        })
                     } else {
                         None
                     };
-                    appname::display_name(&f.exe, &f.title, product.as_deref())
+                    let detected = appname::display_name(&f.exe, &f.title, product.as_deref());
+                    // O nome que o usuário escolheu vale sempre.
+                    let alias = worker.lock().unwrap().cache.aliases.get(&detected).cloned();
+                    alias.unwrap_or(detected)
                 });
 
                 let mut fresh: Vec<(String, Arc<Icon>)> = Vec::new();
@@ -200,13 +230,16 @@ impl Tracker {
                 s.current = name.clone();
                 if let (Some(f), Some(name)) = (fg, name) {
                     // Site com ícone próprio usa o dele; senão, o do programa (o navegador).
-                    let key = site
-                        .map(|d| format!("site:{d}"))
-                        .filter(|k| s.icons.contains_key(k))
-                        .unwrap_or_else(|| f.path.clone());
-                    if s.icon_of.get(&name) != Some(&key) {
-                        s.icon_of.insert(name.clone(), key);
-                        cache_dirty = true;
+                    // O ícone escolhido pelo usuário não é substituído.
+                    if !s.cache.custom_icons.contains_key(&name) {
+                        let key = site
+                            .map(|d| format!("site:{d}"))
+                            .filter(|k| s.icons.contains_key(k))
+                            .unwrap_or_else(|| f.path.clone());
+                        if s.cache.icon_of.get(&name) != Some(&key) {
+                            s.cache.icon_of.insert(name.clone(), key);
+                            s.cache_dirty = true;
+                        }
                     }
                     if Some(&f.exe) != me.as_ref() {
                         *s.session.entry(name.clone()).or_default() += 1;
@@ -216,12 +249,10 @@ impl Tracker {
                 ticks += 1;
                 if ticks % SAVE_EVERY == 0 {
                     let usage = s.usage.clone();
-                    if cache_dirty {
-                        cache.icon_of = s.icon_of.clone();
-                    }
+                    let cache = std::mem::take(&mut s.cache_dirty).then(|| s.cache.clone());
                     drop(s);
                     save(&usage);
-                    if std::mem::take(&mut cache_dirty) {
+                    if let Some(cache) = cache {
                         cache.save();
                     }
                 }
@@ -231,7 +262,61 @@ impl Tracker {
     }
 
     pub fn save_now(&self) {
-        save(&self.shared.lock().unwrap().usage);
+        let s = self.shared.lock().unwrap();
+        save(&s.usage);
+        s.cache.save();
+    }
+
+    /// Renomeia o programa para sempre e grava na hora.
+    pub fn rename_app(&self, from: &str, to: &str) {
+        let mut s = self.shared.lock().unwrap();
+        s.rename(from, to);
+        s.cache_dirty = false;
+        save(&s.usage);
+        s.cache.save();
+    }
+
+    pub fn has_custom_icon(&self, name: &str) -> bool {
+        self.shared.lock().unwrap().cache.custom_icons.contains_key(name)
+    }
+
+    /// Usa a imagem do arquivo como ícone do programa, no lugar do que foi detectado.
+    pub fn set_custom_icon(&self, name: &str, path: &std::path::Path) -> Result<(), String> {
+        // A chave muda a cada troca: a textura da tela é guardada por ela.
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+        let icon = appcache::icon_from_file(path, format!("custom:{name}:{stamp}"))?;
+        appcache::save_icon(&icon);
+        let mut s = self.shared.lock().unwrap();
+        let old = s.cache.icon_of.insert(name.to_owned(), icon.key.clone());
+        // `old` era o ícone detectado na primeira troca; nas seguintes, a imagem anterior do usuário.
+        match s.cache.custom_icons.contains_key(name) {
+            true => {
+                if let Some(old) = old {
+                    appcache::remove_icon(&old);
+                    s.icons.remove(&old);
+                }
+            }
+            false => {
+                s.cache.custom_icons.insert(name.to_owned(), old.unwrap_or_default());
+            }
+        }
+        s.icons.insert(icon.key.clone(), Arc::new(icon));
+        s.cache.save();
+        Ok(())
+    }
+
+    /// Volta ao ícone detectado do programa.
+    pub fn reset_icon(&self, name: &str) {
+        let mut s = self.shared.lock().unwrap();
+        let Some(prev) = s.cache.custom_icons.remove(name) else { return };
+        if let Some(old) = s.cache.icon_of.remove(name) {
+            appcache::remove_icon(&old);
+            s.icons.remove(&old);
+        }
+        if !prev.is_empty() {
+            s.cache.icon_of.insert(name.to_owned(), prev);
+        }
+        s.cache.save();
     }
 
     fn now(s: &Shared) -> Now {
@@ -470,5 +555,32 @@ mod sys {
             }
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renomear_leva_o_historico_e_vale_para_sempre() {
+        let mut s = Shared::default();
+        s.usage.days.entry("2026-05-10".into()).or_default().insert("Foo".into(), 60);
+        s.usage.days.entry("2026-05-10".into()).or_default().insert("Bar".into(), 40);
+        s.session.insert("Foo".into(), 5);
+        s.cache.icon_of.insert("Foo".into(), "c:\foo.exe".into());
+        s.current = Some("Foo".into());
+
+        s.rename("Foo", "Meu app");
+        assert_eq!(s.cache.aliases["Foo"], "Meu app");
+        assert_eq!(s.usage.days["2026-05-10"]["Meu app"], 60);
+        assert_eq!(s.cache.icon_of["Meu app"], "c:\foo.exe");
+        assert_eq!(s.current.as_deref(), Some("Meu app"));
+
+        // Mudar de novo: o nome detectado passa a apontar para o novo, e tempos de nomes iguais se somam.
+        s.rename("Meu app", "Bar");
+        assert_eq!(s.cache.aliases["Foo"], "Bar");
+        assert_eq!(s.usage.days["2026-05-10"]["Bar"], 100);
+        assert!(!s.usage.days["2026-05-10"].contains_key("Foo"));
     }
 }
