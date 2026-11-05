@@ -728,10 +728,10 @@ impl TasksView {
             if let Some(t) = store.tasks.iter_mut().find(|t| t.id == id) {
                 t.time = quick.time;
                 t.tags = quick.tags;
-                if let Some(tag) = &self.tag_filter {
-                    if !t.tags.contains(tag) {
-                        t.tags.push(tag.clone());
-                    }
+                if let Some(tag) = &self.tag_filter
+                    && !t.tags.contains(tag)
+                {
+                    t.tags.push(tag.clone());
                 }
                 t.set_anchor();
             }
@@ -752,10 +752,11 @@ impl TasksView {
         let mut groups: Vec<(Group, Vec<usize>)> = Group::ALL.iter().map(|g| (*g, Vec::new())).collect();
         for (i, t) in store.tasks.iter().enumerate() {
             let group = group_of(t, today, now);
-            if in_filter(self.filter, group, t, today) && self.tag_filter.as_ref().is_none_or(|f| t.tags.contains(f)) {
-                if let Some(slot) = groups.iter_mut().find(|g| g.0 == group) {
-                    slot.1.push(i);
-                }
+            if in_filter(self.filter, group, t, today)
+                && self.tag_filter.as_ref().is_none_or(|f| t.tags.contains(f))
+                && let Some(slot) = groups.iter_mut().find(|g| g.0 == group)
+            {
+                slot.1.push(i);
             }
         }
         groups.retain(|g| !g.1.is_empty());
@@ -1255,13 +1256,13 @@ impl TasksView {
                     }
                 }
                 // "05/11" ou "05/11/26": ao sair da caixa, completa o ano.
-                if r.lost_focus() {
-                    if let Some(d) = complete_date(&self.date_buf, today) {
-                        self.date_buf = d.format("%d/%m/%Y").to_string();
-                        t.date = Some(d);
-                        t.set_anchor();
-                        changed = true;
-                    }
+                if r.lost_focus()
+                    && let Some(d) = complete_date(&self.date_buf, today)
+                {
+                    self.date_buf = d.format("%d/%m/%Y").to_string();
+                    t.date = Some(d);
+                    t.set_anchor();
+                    changed = true;
                 }
                 if let Some(mut month) = self.cal_month {
                     let id = ui.scope_id().with("calendario");

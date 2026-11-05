@@ -74,21 +74,6 @@ pub fn remove_icon(key: &str) {
     let _ = std::fs::remove_file(icon_file(key));
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn icone_volta_igual_do_disco() {
-        let key = "teste:ida-e-volta";
-        let rgba: Vec<u8> = (0..4 * 4 * 4).map(|i| (i * 3) as u8).collect();
-        save_icon(&Icon { key: key.to_owned(), w: 4, h: 4, rgba: rgba.clone() });
-        let back = load_icon(key).expect("ícone salvo");
-        assert_eq!((back.w, back.h, back.rgba), (4, 4, rgba));
-        let _ = std::fs::remove_file(icon_file(key));
-    }
-}
-
 /// Baixa o ícone do site (uma requisição pequena, feita uma vez e guardada). Usa o `curl` que já vem no Windows.
 pub fn fetch_site_icon(domain: &str) -> Option<Icon> {
     use std::os::windows::process::CommandExt;
@@ -109,4 +94,19 @@ pub fn fetch_site_icon(domain: &str) -> Option<Icon> {
     let icon = Icon { key, w, h, rgba: img.into_raw() };
     save_icon(&icon);
     Some(icon)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn icone_volta_igual_do_disco() {
+        let key = "teste:ida-e-volta";
+        let rgba: Vec<u8> = (0..4 * 4 * 4).map(|i| (i * 3) as u8).collect();
+        save_icon(&Icon { key: key.to_owned(), w: 4, h: 4, rgba: rgba.clone() });
+        let back = load_icon(key).expect("ícone salvo");
+        assert_eq!((back.w, back.h, back.rgba), (4, 4, rgba));
+        let _ = std::fs::remove_file(icon_file(key));
+    }
 }

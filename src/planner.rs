@@ -366,12 +366,12 @@ impl Planner {
         }
         if !ctx.input(|i| i.pointer.any_down()) {
             self.drag = None;
-            if let Some((_, to)) = target.filter(|(_, to)| *to != from) {
-                if let Some(t) = store.tasks.iter_mut().find(|t| t.id == id) {
-                    t.date = t.date.map(|d| d + (to - from));
-                    t.set_anchor();
-                    store.dirty = true;
-                }
+            if let Some((_, to)) = target.filter(|(_, to)| *to != from)
+                && let Some(t) = store.tasks.iter_mut().find(|t| t.id == id)
+            {
+                t.date = t.date.map(|d| d + (to - from));
+                t.set_anchor();
+                store.dirty = true;
             }
         }
     }

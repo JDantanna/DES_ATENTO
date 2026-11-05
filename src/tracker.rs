@@ -249,7 +249,7 @@ impl Tracker {
                     }
                 }
                 ticks += 1;
-                if ticks % SAVE_EVERY == 0 && !s.frozen {
+                if ticks.is_multiple_of(SAVE_EVERY) && !s.frozen {
                     let usage = s.usage.clone();
                     let cache = std::mem::take(&mut s.cache_dirty).then(|| s.cache.clone());
                     drop(s);
@@ -360,7 +360,7 @@ impl Tracker {
         let app_secs = s.current.as_deref().and_then(|c| today.and_then(|t| t.get(c))).copied().unwrap_or(0);
         let total = today.map(|t| t.values().sum()).unwrap_or(0);
         let mut session: Vec<AppRow> = s.session.iter().map(|(n, secs)| s.row(n, *secs)).collect();
-        session.sort_by(|a, b| b.secs.cmp(&a.secs));
+        session.sort_by_key(|r| std::cmp::Reverse(r.secs));
         session.truncate(40);
         WidgetData { now: Self::now(&s), app_secs, total, session }
     }

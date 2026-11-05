@@ -59,12 +59,12 @@ fn clean(s: &str) -> String {
 /// Remove o contador de notificações do começo: "(3) WhatsApp" -> "WhatsApp".
 fn strip_counter(s: &str) -> &str {
     let t = s.trim();
-    if let Some(rest) = t.strip_prefix('(') {
-        if let Some((n, tail)) = rest.split_once(')') {
-            if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
-                return tail.trim_start();
-            }
-        }
+    if let Some(rest) = t.strip_prefix('(')
+        && let Some((n, tail)) = rest.split_once(')')
+        && !n.is_empty()
+        && n.chars().all(|c| c.is_ascii_digit())
+    {
+        return tail.trim_start();
     }
     t
 }

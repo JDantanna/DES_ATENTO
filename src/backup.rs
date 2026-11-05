@@ -430,10 +430,10 @@ impl Backup {
                         if ui.add_enabled(!running, egui::Button::new("Fazer backup agora")).clicked() {
                             request = Some(Request::BackupNow);
                         }
-                        if ui.button("Abrir pasta").clicked() {
-                            if let Some(dir) = &settings.backup_dir {
-                                let _ = std::process::Command::new("explorer.exe").arg(dir).spawn();
-                            }
+                        if ui.button("Abrir pasta").clicked()
+                            && let Some(dir) = &settings.backup_dir
+                        {
+                            let _ = std::process::Command::new("explorer.exe").arg(dir).spawn();
                         }
                         turn_off = ui.add(egui::Button::new("Desligar").frame(false)).clicked();
                     });
