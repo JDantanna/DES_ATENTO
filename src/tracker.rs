@@ -568,13 +568,13 @@ mod tests {
         s.usage.days.entry("2026-05-10".into()).or_default().insert("Foo".into(), 60);
         s.usage.days.entry("2026-05-10".into()).or_default().insert("Bar".into(), 40);
         s.session.insert("Foo".into(), 5);
-        s.cache.icon_of.insert("Foo".into(), "c:\foo.exe".into());
+        s.cache.icon_of.insert("Foo".into(), "foo.exe".into());
         s.current = Some("Foo".into());
 
         s.rename("Foo", "Meu app");
         assert_eq!(s.cache.aliases["Foo"], "Meu app");
         assert_eq!(s.usage.days["2026-05-10"]["Meu app"], 60);
-        assert_eq!(s.cache.icon_of["Meu app"], "c:\foo.exe");
+        assert_eq!(s.cache.icon_of["Meu app"], "foo.exe");
         assert_eq!(s.current.as_deref(), Some("Meu app"));
 
         // Mudar de novo: o nome detectado passa a apontar para o novo, e tempos de nomes iguais se somam.
