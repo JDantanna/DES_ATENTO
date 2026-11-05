@@ -267,7 +267,7 @@ impl TasksView {
                 let has_notes = !notes.is_empty();
                 let open = has_notes && !self.collapsed.contains(&t.id);
                 let footer = open.then(|| {
-                    let mut job = egui::text::LayoutJob::simple(notes.to_owned(), egui::FontId::proportional(12.0), DIM, width - 70.0);
+                    let mut job = egui::text::LayoutJob::simple(notes.to_owned(), egui::FontId::proportional(12.0), DIM, (width - 70.0).max(60.0));
                     job.wrap.max_rows = 4;
                     job.wrap.overflow_character = Some('…');
                     ui.painter().layout_job(job)
@@ -306,6 +306,8 @@ impl TasksView {
                 let layout = egui::Layout::left_to_right(egui::Align::Center);
                 ui.scope_builder(egui::UiBuilder::new().max_rect(top_row).layout(layout), |ui| {
                     ui.set_min_height(ROW_H);
+                    // Textos não capturam o mouse: clicar ou arrastar neles vale para a linha inteira.
+                    ui.style_mut().interaction.selectable_labels = false;
                     if ui.checkbox(&mut t.done, "").changed() {
                         t.roll_over();
                         dirty = true;

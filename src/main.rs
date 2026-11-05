@@ -43,7 +43,6 @@ struct App {
     coach: CoachView,
     tracker: Tracker,
     updater: Updater,
-    logo: egui::TextureHandle,
     tray: Option<tray::Tray>,
     ask_minimize: bool,
     /// Mostra a pergunta "sair ou ir para a bandeja?" ao fechar.
@@ -68,21 +67,15 @@ impl App {
         let day = Local::now().date_naive();
         let today = store.today_titles(day);
         let behind = store.pending_before(day);
-        let logo = cc.egui_ctx.load_texture(
-            "navi",
-            egui::ColorImage::from_rgba_unmultiplied([64, 64], include_bytes!("../assets/icon64.rgba")),
-            egui::TextureOptions::LINEAR,
-        );
         Self {
             splash: Some(Splash::new(today, behind)),
             tab: Tab::Tarefas,
             store,
             tasks: TasksView::new(),
             planner: Planner::new(),
-            coach: CoachView::new(),
+            coach: CoachView::new(settings.widget_small),
             tracker: Tracker::start(),
             updater: Updater::default(),
-            logo,
             tray: None,
             ask_minimize: false,
             ask_close: false,
@@ -217,12 +210,11 @@ impl App {
         .on_hover_text("Tamanho da interface");
     }
 
-    /// A logo só cresce um pouco quando o mouse passa por cima.
-    fn logo_ui(&self, ui: &mut egui::Ui) {
-        let size = vec2(24.0, 24.0);
-        let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+    /// A fada do cabeçalho, sem o fundo do ícone; só cresce um pouco quando o mouse passa por cima.
+    fn logo_ui(ui: &mut egui::Ui) {
+        let (rect, resp) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::hover());
         let grow = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.15);
-        egui::Image::new((self.logo.id(), size)).paint_at(ui, egui::Rect::from_center_size(rect.center(), size * (1.0 + 0.25 * grow)));
+        fairy::draw(ui.painter(), rect.center(), 30.0 * (1.0 + 0.25 * grow), 0.0, 0.3 + 0.7 * grow);
     }
 
     /// Aplica a escolha de minimizar (bandeja ou só minimizar).
@@ -253,7 +245,7 @@ impl App {
             .resizable(false)
             .show(ctx, |ui| {
                 ui.label("Quer mesmo sair?");
-                ui.weak("Saindo, o Coach para de rastrear e os avisos de tarefas deixam de tocar.");
+                ui.weak("Saindo, o Coach para de rastrear e os avisos de tarefas deixam de aparecer.");
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui.button("Sair").clicked() {
@@ -325,8 +317,8 @@ impl App {
             }
             ui.horizontal_centered(|ui| {
                 ui.add_space(14.0);
-                self.logo_ui(ui);
-                ui.label(egui::RichText::new("Navi").strong().size(16.0));
+                Self::logo_ui(ui);
+                ui.add(egui::Label::new(egui::RichText::new("Navi").strong().size(16.0)).selectable(false));
                 ui.add_space(14.0);
                 for (tab, label) in [(Tab::Tarefas, "Tarefas"), (Tab::Calendario, "Calendário"), (Tab::Coach, "Coach")] {
                     let sel = self.tab == tab;
@@ -431,6 +423,10 @@ impl eframe::App for App {
         }
         if self.coach.take_open_app() {
             self.restore(ui.ctx());
+        }
+        if let Some(small) = self.coach.take_format_change() {
+            self.settings.widget_small = small;
+            self.settings.save();
         }
         if self.ask_minimize {
             let ctx = ui.ctx().clone();

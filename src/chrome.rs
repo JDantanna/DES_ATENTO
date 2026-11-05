@@ -3,6 +3,9 @@
 
 use eframe::egui::{self, Color32, CursorIcon, Rect, Response, Sense, Stroke, vec2};
 use egui::viewport::ResizeDirection as Dir;
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+use windows_sys::Win32::UI::WindowsAndMessaging::{IsZoomed, WM_NCCALCSIZE};
 
 pub const RADIUS: f32 = 14.0;
 
@@ -18,6 +21,10 @@ pub enum Glyph {
     SortUp,
     /// Seta para baixo: ordem decrescente.
     SortDown,
+    /// Divisa para cima: reduzir.
+    ChevronUp,
+    /// Divisa para baixo: expandir.
+    ChevronDown,
 }
 
 pub fn window_button(ui: &mut egui::Ui, glyph: Glyph) -> Response {
@@ -80,6 +87,11 @@ pub fn icon_button(ui: &mut egui::Ui, glyph: Glyph, spin: f32) -> Response {
             p.line_segment([c + vec2(-4.5, 1.5 * s), c + vec2(0.0, 6.0 * s)], st);
             p.line_segment([c + vec2(4.5, 1.5 * s), c + vec2(0.0, 6.0 * s)], st);
         }
+        Glyph::ChevronUp | Glyph::ChevronDown => {
+            let s = if glyph == Glyph::ChevronUp { -1.0 } else { 1.0 };
+            p.line_segment([c + vec2(-5.0, -2.5 * s), c + vec2(0.0, 2.5 * s)], st);
+            p.line_segment([c + vec2(5.0, -2.5 * s), c + vec2(0.0, 2.5 * s)], st);
+        }
         Glyph::Trash => {
             p.line_segment([c + vec2(-6.0, -4.0), c + vec2(6.0, -4.0)], st); // tampa
             p.rect_stroke(Rect::from_min_max(c + vec2(-2.0, -6.5), c + vec2(2.0, -4.0)), 1.0, st, egui::StrokeKind::Middle); // alça
@@ -99,13 +111,28 @@ pub fn close_button(ui: &mut egui::Ui) -> Response {
     window_button(ui, Glyph::Close)
 }
 
-/// Tira da janela a moldura quadrada que o Windows desenha atrás de janelas sem decoração (sombra e
-/// borda de 1 px), que aparecia por trás dos cantos arredondados. Retorna `false` se a janela ainda não existe.
+/// Sem isto, o winit reserva 1 px no topo das janelas sem decoração (para ter a sombra do sistema), e o
+/// Windows pinta esse pixel de preto: era a linha preta acima do widget. Aqui a janela inteira vira área útil.
+/// Maximizada, a janela segue a regra do winit, que limita o tamanho à área de trabalho do monitor.
+unsafe extern "system" fn no_top_line(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, _data: usize) -> LRESULT {
+    unsafe {
+        if msg == WM_NCCALCSIZE && wparam != 0 && IsZoomed(hwnd) == 0 {
+            return 0;
+        }
+        DefSubclassProc(hwnd, msg, wparam, lparam)
+    }
+}
+
+/// Tira da janela a moldura que o Windows desenha em janelas sem decoração (sombra, borda e a linha preta
+/// de 1 px no topo), que aparecia atrás dos cantos arredondados. Retorna `false` se a janela ainda não existe.
+/// Deve ser chamada na thread da janela (a da interface).
 pub fn flatten_window(title: &str) -> bool {
     use std::ffi::c_void;
     use windows_sys::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute};
     use windows_sys::Win32::UI::Controls::MARGINS;
-    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+    };
 
     let wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
     unsafe {
@@ -119,6 +146,9 @@ pub fn flatten_window(title: &str) -> bool {
         let one: i32 = 1;
         DwmSetWindowAttribute(hwnd, 2, &one as *const i32 as *const c_void, 4);
         DwmSetWindowAttribute(hwnd, 33, &one as *const i32 as *const c_void, 4);
+        // Passa a responder o cálculo da moldura e pede para o Windows refazê-lo já.
+        SetWindowSubclass(hwnd, Some(no_top_line), 1, 0);
+        SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
     true
 }

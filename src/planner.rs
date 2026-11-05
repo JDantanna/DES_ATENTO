@@ -369,7 +369,11 @@ impl Planner {
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        *dirty |= ui.checkbox(&mut t.done, "").changed();
+                        // Como na lista de tarefas: concluir uma recorrente a reagenda para a próxima data.
+                        if ui.checkbox(&mut t.done, "").changed() {
+                            t.roll_over();
+                            *dirty = true;
+                        }
                         let mut text = egui::RichText::new(&t.title);
                         if t.done {
                             text = text.strikethrough().weak();

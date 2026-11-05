@@ -490,11 +490,13 @@ pub struct Settings {
     pub scale: f32,
     /// O aviso "continua na bandeja" já foi mostrado (só aparece na primeira vez).
     pub tray_notice_shown: bool,
+    /// O widget usa o formato pequeno (faixa) em vez do médio.
+    pub widget_small: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { minimize_to_tray: None, scale: 1.0, tray_notice_shown: false }
+        Self { minimize_to_tray: None, scale: 1.0, tray_notice_shown: false, widget_small: false }
     }
 }
 
