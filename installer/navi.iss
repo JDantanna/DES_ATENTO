@@ -33,7 +33,7 @@ Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortugue
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "autostart"; Description: "Iniciar com o Windows (necessário para o Coach medir o dia todo)"; GroupDescription: "Opções:"; Flags: unchecked
+Name: "autostart"; Description: "Iniciar com o Windows (necessário para o Monitoramento medir o dia todo)"; GroupDescription: "Opções:"; Flags: unchecked
 
 [InstallDelete]
 ; Restos da versão antiga (Des_Atento).

@@ -2,12 +2,14 @@
 
 mod appcache;
 mod appname;
+#[cfg(test)]
+mod capturas;
 mod chrome;
-mod coach;
 mod datepicker;
 mod fairy;
 mod ics;
 mod model;
+mod monitor;
 mod notify;
 mod planner;
 mod splash;
@@ -18,9 +20,9 @@ mod tracker;
 mod updater;
 
 use chrono::Local;
-use coach::CoachView;
 use eframe::egui::{self, Color32, Sense, Stroke, vec2};
 use model::{Settings, Store};
+use monitor::MonitorView;
 use planner::Planner;
 use splash::Splash;
 use tasks::TasksView;
@@ -28,20 +30,27 @@ use theme::ACCENT;
 use tracker::Tracker;
 use updater::{State, Updater};
 
+/// Tamanho mínimo da janela, em pontos da interface (acompanha a escala escolhida).
+const MIN_WINDOW: egui::Vec2 = vec2(480.0, 420.0);
+/// Abaixo desta largura, as abas descem para uma segunda linha.
+const TABS_INLINE_W: f32 = 700.0;
+/// O mesmo, com o botão de atualizar (mais largo) à mostra.
+const TABS_INLINE_BUSY_W: f32 = 900.0;
+
 #[derive(PartialEq, Clone, Copy)]
-enum Tab {
+pub(crate) enum Tab {
     Tarefas,
     Calendario,
-    Coach,
+    Monitoramento,
 }
 
-struct App {
-    splash: Option<Splash>,
-    tab: Tab,
+pub(crate) struct App {
+    pub(crate) splash: Option<Splash>,
+    pub(crate) tab: Tab,
     store: Store,
-    tasks: TasksView,
-    planner: Planner,
-    coach: CoachView,
+    pub(crate) tasks: TasksView,
+    pub(crate) planner: Planner,
+    monitor: MonitorView,
     tracker: Tracker,
     updater: Updater,
     tray: Option<tray::Tray>,
@@ -56,6 +65,10 @@ struct App {
     restore_stage: u8,
     /// A moldura quadrada do Windows já foi removida da janela principal.
     frame_fixed: bool,
+    /// A janela principal estava fora de cena (minimizada ou na bandeja) no quadro anterior.
+    was_away: bool,
+    /// Escala para a qual o tamanho mínimo da janela foi calculado.
+    min_size_zoom: f32,
 }
 
 impl App {
@@ -68,13 +81,17 @@ impl App {
         let day = Local::now().date_naive();
         let today = store.today_titles(day);
         let behind = store.pending_before(day);
+        Self::with(store, settings, Some(Splash::new(today, behind)))
+    }
+
+    pub(crate) fn with(store: Store, settings: Settings, splash: Option<Splash>) -> Self {
         Self {
-            splash: Some(Splash::new(today, behind)),
+            splash,
             tab: Tab::Tarefas,
             store,
             tasks: TasksView::new(),
             planner: Planner::new(),
-            coach: CoachView::new(settings.widget_small),
+            monitor: MonitorView::new(settings.widget_small),
             tracker: Tracker::start(),
             updater: Updater::default(),
             tray: None,
@@ -85,18 +102,25 @@ impl App {
             scale_dirty: false,
             restore_stage: 0,
             frame_fixed: false,
+            was_away: false,
+            min_size_zoom: 1.0,
         }
     }
 
-    fn update_ui(&mut self, ui: &mut egui::Ui) {
+    /// Atualização: `wide` diz se há espaço para a versão e as mensagens por extenso.
+    fn update_ui(&mut self, ui: &mut egui::Ui, wide: bool) {
         let ctx = ui.ctx().clone();
-        ui.weak(format!("v{}", updater::VERSION));
+        if wide {
+            ui.weak(format!("v{}", updater::VERSION));
+        }
         match self.updater.state() {
             State::Checking | State::Downloading => {
                 // O ícone gira enquanto trabalha.
                 let spin = ui.input(|i| i.time) as f32 * 5.0;
                 chrome::icon_button(ui, chrome::Glyph::Refresh, spin);
-                ui.weak(if matches!(self.updater.state(), State::Checking) { "Verificando..." } else { "Baixando atualização..." });
+                if wide {
+                    ui.weak(if matches!(self.updater.state(), State::Checking) { "Verificando..." } else { "Baixando atualização..." });
+                }
                 ctx.request_repaint_after(std::time::Duration::from_millis(33));
             }
             State::Available { version, url } => {
@@ -109,11 +133,11 @@ impl App {
                     self.updater.check(ctx);
                 }
                 match st {
-                    State::UpToDate => {
+                    State::UpToDate if wide => {
                         ui.weak("Na versão mais recente");
                     }
                     State::Error(e) => {
-                        ui.colored_label(Color32::LIGHT_RED, e);
+                        ui.add(egui::Label::new(egui::RichText::new(e).color(Color32::LIGHT_RED)).truncate());
                     }
                     _ => {}
                 }
@@ -187,6 +211,19 @@ impl App {
         }
     }
 
+    /// O tamanho mínimo é em pontos: ao mudar a escala, ele é refeito e a janela cresce se ficou pequena demais.
+    fn sync_min_size(&mut self, ctx: &egui::Context) {
+        let zoom = ctx.zoom_factor();
+        if (zoom - self.min_size_zoom).abs() > 1e-3 {
+            self.min_size_zoom = zoom;
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(MIN_WINDOW));
+            let size = ctx.content_rect().size();
+            if size.x < MIN_WINDOW.x || size.y < MIN_WINDOW.y {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size.max(MIN_WINDOW)));
+            }
+        }
+    }
+
     fn scale_menu(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         ui.menu_button("Aa", |ui| {
@@ -227,6 +264,20 @@ impl App {
         }
     }
 
+    /// O widget acompanha a janela principal: abre quando ela sai de cena, por qualquer caminho
+    /// (botão, Win+D, barra de tarefas ou bandeja), e fecha quando ela volta.
+    fn sync_widget(&mut self, ctx: &egui::Context) {
+        let away = self.tray.is_some() || ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        if away != self.was_away {
+            self.was_away = away;
+            if away {
+                self.monitor.open_widget();
+            } else {
+                self.monitor.close_widget();
+            }
+        }
+    }
+
     /// Encerra o app de verdade (sem passar pela pergunta).
     fn quit(&mut self, ctx: &egui::Context) {
         self.quitting = true;
@@ -246,9 +297,9 @@ impl App {
             .resizable(false)
             .show(ctx, |ui| {
                 ui.label("Quer mesmo sair?");
-                ui.weak("Saindo, o Coach para de rastrear e os avisos de tarefas deixam de aparecer.");
+                ui.weak("Saindo, o monitoramento para e os avisos de tarefas deixam de aparecer.");
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui.button("Sair").clicked() {
                         choice = Some(Choice::Quit);
                     }
@@ -284,7 +335,7 @@ impl App {
                 ui.label("Para onde o Navi deve ir?");
                 ui.weak("Pergunto só desta vez. Clique com o botão direito no botão de minimizar para mudar.");
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui.button("Bandeja do sistema").clicked() {
                         choice = Some(true);
                     }
@@ -304,8 +355,26 @@ impl App {
         }
     }
 
+    /// Botões das abas; `fill` os estica para ocupar a linha toda.
+    fn tabs(&mut self, ui: &mut egui::Ui, fill: bool) {
+        const TABS: [(Tab, &str); 3] = [(Tab::Tarefas, "Tarefas"), (Tab::Calendario, "Calendário"), (Tab::Monitoramento, "Monitoramento")];
+        let width = if fill { (ui.available_width() - 2.0 * ui.spacing().item_spacing.x) / 3.0 } else { 0.0 };
+        for (tab, label) in TABS {
+            let sel = self.tab == tab;
+            let text = egui::RichText::new(label).size(14.5).color(if sel { Color32::WHITE } else { Color32::from_gray(160) });
+            let bg = if sel { ACCENT.gamma_multiply(0.22) } else { Color32::TRANSPARENT };
+            let button = egui::Button::new(text).fill(bg).stroke(Stroke::NONE).corner_radius(9).min_size(vec2(width, 0.0));
+            if ui.add(button).clicked() {
+                self.tab = tab;
+            }
+        }
+    }
+
     fn title_bar(&mut self, ui: &mut egui::Ui, maximized: bool) {
         let ctx = ui.ctx().clone();
+        let width = ui.available_width();
+        let busy = matches!(self.updater.state(), State::Available { .. } | State::Downloading | State::Error(_));
+        let inline = width >= if busy { TABS_INLINE_BUSY_W } else { TABS_INLINE_W };
         egui::Panel::top("bar").frame(egui::Frame::NONE).show(ui, |ui| {
             ui.set_height(44.0);
             let rect = ui.max_rect();
@@ -321,13 +390,8 @@ impl App {
                 Self::logo_ui(ui);
                 ui.add(egui::Label::new(egui::RichText::new("Navi").strong().size(16.0)).selectable(false));
                 ui.add_space(14.0);
-                for (tab, label) in [(Tab::Tarefas, "Tarefas"), (Tab::Calendario, "Calendário"), (Tab::Coach, "Coach")] {
-                    let sel = self.tab == tab;
-                    let text = egui::RichText::new(label).size(14.5).color(if sel { Color32::WHITE } else { Color32::from_gray(160) });
-                    let fill = if sel { ACCENT.gamma_multiply(0.22) } else { Color32::TRANSPARENT };
-                    if ui.add(egui::Button::new(text).fill(fill).stroke(Stroke::NONE).corner_radius(9)).clicked() {
-                        self.tab = tab;
-                    }
+                if inline {
+                    self.tabs(ui, false);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(8.0);
@@ -351,27 +415,29 @@ impl App {
                     ui.add_space(8.0);
                     self.scale_menu(ui);
                     ui.add_space(4.0);
-                    self.update_ui(ui);
+                    self.update_ui(ui, width >= 1040.0);
                 });
             });
         });
+        if !inline {
+            let frame = egui::Frame::NONE.inner_margin(egui::Margin { left: 12, right: 12, top: 0, bottom: 6 });
+            egui::Panel::top("abas").frame(frame).show(ui, |ui| {
+                ui.horizontal(|ui| self.tabs(ui, true));
+            });
+        }
     }
-}
 
-impl eframe::App for App {
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        egui::Rgba::TRANSPARENT.to_array()
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    /// A interface inteira da janela principal, em um quadro.
+    pub(crate) fn root(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.sync_scale(&ctx);
+        self.sync_min_size(&ctx);
         if !self.frame_fixed {
             self.frame_fixed = chrome::flatten_window("Navi");
         }
         let fade = self.fade(&ctx, ui.scope_id().with("app_fade"));
         ui.set_opacity(fade);
-        let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
+        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
         let radius = if maximized { 0.0 } else { chrome::RADIUS };
         let full = ui.max_rect();
         ui.painter().rect_filled(full, radius, theme::BG);
@@ -388,7 +454,7 @@ impl eframe::App for App {
         }
 
         match tray::take_request() {
-            Some(tray::Request::Restore) => self.restore(ui.ctx()),
+            Some(tray::Request::Restore) => self.restore(&ctx),
             Some(tray::Request::Quit) => self.quit(&ctx),
             None => {}
         }
@@ -408,7 +474,7 @@ impl eframe::App for App {
                     self.tab = Tab::Tarefas;
                 }
             }
-            Tab::Coach => self.coach.show(ui, &self.tracker),
+            Tab::Monitoramento => self.monitor.show(ui, &self.tracker),
         }
         if self.tab != Tab::Calendario {
             self.planner.cancel_drag();
@@ -417,31 +483,39 @@ impl eframe::App for App {
             self.tasks.cancel_drag();
         }
 
-        self.coach.floating(ui, &self.tracker);
-        self.coach.panel(ui, &self.tracker);
-        if self.coach.take_opened() {
-            let ctx = ui.ctx().clone();
+        self.sync_widget(&ctx);
+        self.monitor.floating(ui, &self.tracker);
+        self.monitor.panel(ui, &self.tracker);
+        if self.monitor.take_opened() {
             self.go_tray(&ctx);
         }
-        if self.coach.take_open_app() {
-            self.restore(ui.ctx());
+        if self.monitor.take_open_app() {
+            self.restore(&ctx);
         }
-        if let Some(small) = self.coach.take_format_change() {
+        if let Some(small) = self.monitor.take_format_change() {
             self.settings.widget_small = small;
             self.settings.save();
         }
         if self.ask_minimize {
-            let ctx = ui.ctx().clone();
             self.minimize_dialog(&ctx);
         }
         if self.ask_close {
-            let ctx = ui.ctx().clone();
             self.close_dialog(&ctx);
         }
 
         if self.store.dirty {
             self.store.save();
         }
+    }
+}
+
+impl eframe::App for App {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        egui::Rgba::TRANSPARENT.to_array()
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.root(ui);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -461,7 +535,7 @@ fn main() -> eframe::Result {
             .with_decorations(false)
             .with_transparent(true)
             .with_inner_size([1000.0, 640.0])
-            .with_min_inner_size([760.0, 460.0]),
+            .with_min_inner_size(MIN_WINDOW),
         ..Default::default()
     };
     eframe::run_native("Navi", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))

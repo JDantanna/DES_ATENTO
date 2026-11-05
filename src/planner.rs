@@ -1,22 +1,29 @@
 use chrono::{Datelike, Duration, Local, Months, NaiveDate};
 use eframe::egui::{self, Align2, Color32, FontId, Sense, vec2};
 
+use crate::chrome;
 use crate::model::{Store, tag_rgb};
 use crate::tasks::{OVERDUE, OVERDUE_TEXT};
 use crate::splash::MESES;
 use crate::theme::ACCENT;
 
 const DIAS_CURTOS: [&str; 7] = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"];
+/// Abaixo desta largura, a barra do calendário usa duas linhas.
+const TOOLBAR_ONE_LINE_W: f32 = 620.0;
+/// Com colunas mais estreitas que isto, a semana vira uma lista de dias (as tarefas ficariam ilegíveis).
+const WEEK_MIN_COL_W: f32 = 112.0;
+/// Altura mínima de uma célula do mês; com menos espaço, a grade rola.
+const MONTH_MIN_CELL_H: f32 = 40.0;
 
 #[derive(PartialEq, Clone, Copy)]
-enum Mode {
+pub(crate) enum Mode {
     Dia,
     Semana,
     Mes,
 }
 
 pub struct Planner {
-    mode: Mode,
+    pub(crate) mode: Mode,
     anchor: NaiveDate,
     week_starts_sunday: bool,
     show_done: bool,
@@ -96,29 +103,44 @@ impl Planner {
         }
     }
 
+    /// Avançar, voltar, ir para hoje e o período mostrado.
+    fn nav(&mut self, ui: &mut egui::Ui) {
+        if ui.button("‹").clicked() {
+            self.step(-1);
+        }
+        if ui.button("Hoje").clicked() {
+            self.anchor = Local::now().date_naive();
+        }
+        if ui.button("›").clicked() {
+            self.step(1);
+        }
+        ui.add(egui::Label::new(egui::RichText::new(self.title()).heading()).selectable(false).truncate());
+    }
+
+    /// Opções e a escolha entre dia, semana e mês, da direita para a esquerda.
+    fn modes(&mut self, ui: &mut egui::Ui) {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.menu_button("Opções", |ui| {
+                ui.checkbox(&mut self.week_starts_sunday, "Semana começa no domingo");
+                ui.checkbox(&mut self.show_done, "Mostrar concluídas");
+            });
+            ui.selectable_value(&mut self.mode, Mode::Mes, "Mês");
+            ui.selectable_value(&mut self.mode, Mode::Semana, "Semana");
+            ui.selectable_value(&mut self.mode, Mode::Dia, "Dia");
+        });
+    }
+
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            if ui.button("‹").clicked() {
-                self.step(-1);
-            }
-            if ui.button("Hoje").clicked() {
-                self.anchor = Local::now().date_naive();
-            }
-            if ui.button("›").clicked() {
-                self.step(1);
-            }
-            ui.label(egui::RichText::new(self.title()).heading());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.menu_button("Opções", |ui| {
-                    ui.checkbox(&mut self.week_starts_sunday, "Semana começa no domingo");
-                    ui.checkbox(&mut self.show_done, "Mostrar concluídas");
-                });
-                ui.selectable_value(&mut self.mode, Mode::Mes, "Mês");
-                ui.selectable_value(&mut self.mode, Mode::Semana, "Semana");
-                ui.selectable_value(&mut self.mode, Mode::Dia, "Dia");
+        if ui.available_width() >= TOOLBAR_ONE_LINE_W {
+            ui.horizontal(|ui| {
+                self.nav(ui);
+                self.modes(ui);
             });
-        });
+        } else {
+            ui.horizontal(|ui| self.nav(ui));
+            ui.horizontal(|ui| self.modes(ui));
+        }
         ui.add_space(4.0);
     }
 
@@ -134,7 +156,13 @@ impl Planner {
         v
     }
 
+    /// O mês ocupa toda a área; numa janela muito baixa, a grade rola em vez de sair da tela.
     fn month(&mut self, ui: &mut egui::Ui, store: &mut Store) -> Option<u64> {
+        let avail = ui.available_size();
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.month_grid(ui, store, avail)).inner
+    }
+
+    fn month_grid(&mut self, ui: &mut egui::Ui, store: &mut Store, avail: egui::Vec2) -> Option<u64> {
         let first = self.anchor.with_day(1).unwrap();
         let next = first.checked_add_months(Months::new(1)).unwrap();
         let days = (next - first).num_days();
@@ -145,10 +173,9 @@ impl Planner {
         let now = Local::now().naive_local();
 
         let order: [usize; 7] = if self.week_starts_sunday { [6, 0, 1, 2, 3, 4, 5] } else { [0, 1, 2, 3, 4, 5, 6] };
-        let avail = ui.available_size();
         let head_h = 22.0;
         let cell_w = avail.x / 7.0;
-        let cell_h = ((avail.y - head_h) / rows as f32).max(70.0);
+        let cell_h = ((avail.y - head_h) / rows as f32).max(MONTH_MIN_CELL_H);
         let (area, _) = ui.allocate_exact_size(vec2(avail.x, head_h + cell_h * rows as f32), Sense::hover());
         let painter = ui.painter_at(area);
 
@@ -267,19 +294,48 @@ impl Planner {
         let mut open = None;
         let mut dirty = false;
         let mut cells = Vec::with_capacity(7);
-        ui.columns(7, |cols| {
-            for (c, col) in cols.iter_mut().enumerate() {
+        let area = ui.available_rect_before_wrap();
+        let col_w = area.width() / 7.0;
+        let day_head = |d: NaiveDate| {
+            let name = DIAS_CURTOS[d.weekday().num_days_from_monday() as usize];
+            let head = egui::RichText::new(format!("{name} {}", d.day())).strong();
+            egui::Label::new(if d == today { head.color(ACCENT) } else { head }).selectable(false).truncate()
+        };
+        if col_w >= WEEK_MIN_COL_W {
+            // Cada dia tem sua coluna, com limite próprio: nada passa para a coluna ao lado.
+            for c in 0..7 {
                 let d = start + Duration::days(c as i64);
-                cells.push((col.max_rect(), d));
-                let name = DIAS_CURTOS[d.weekday().num_days_from_monday() as usize];
-                let head = egui::RichText::new(format!("{name} {}", d.day())).strong();
-                col.label(if d == today { head.color(ACCENT) } else { head });
-                col.separator();
-                egui::ScrollArea::vertical().id_salt(("semana", c)).show(col, |ui| {
-                    self.cards(ui, store, d, true, &mut open, &mut dirty);
+                let col = egui::Rect::from_min_size(area.min + vec2(c as f32 * col_w, 0.0), vec2(col_w, area.height())).shrink2(vec2(2.0, 0.0));
+                cells.push((col, d));
+                let bg = if d == today { ACCENT.gamma_multiply(0.10) } else { Color32::from_rgb(23, 26, 38) };
+                ui.painter().rect_filled(col, 8.0, bg);
+                chrome::region(ui, col.shrink(6.0), ("coluna", c), |ui| {
+                    ui.add(day_head(d));
+                    ui.separator();
+                    egui::ScrollArea::vertical().id_salt(("semana", c)).auto_shrink([false, false]).show(ui, |ui| {
+                        self.cards(ui, store, d, true, &mut open, &mut dirty);
+                    });
                 });
             }
-        });
+            ui.advance_cursor_after_rect(area);
+        } else {
+            // Sem largura para sete colunas: os dias ficam um embaixo do outro.
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                for c in 0..7 {
+                    let d = start + Duration::days(c as i64);
+                    let day = ui.scope(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.add(day_head(d));
+                        if self.tasks_on(store, d).is_empty() {
+                            ui.weak("Nenhuma tarefa");
+                        }
+                        self.cards(ui, store, d, true, &mut open, &mut dirty);
+                    });
+                    cells.push((day.response.rect, d));
+                    ui.separator();
+                }
+            });
+        }
         store.dirty |= dirty;
         self.finish_drag(ui, store, &cells);
         open
@@ -330,11 +386,8 @@ impl Planner {
         let mut dirty = false;
         let d = self.anchor;
         ui.horizontal(|ui| {
-            let r = ui.add(
-                egui::TextEdit::singleline(&mut self.new_title)
-                    .hint_text("Nova tarefa para este dia...")
-                    .desired_width(crate::tasks::NEW_TASK_W),
-            );
+            let width = crate::tasks::NEW_TASK_W.min(ui.available_width() - 70.0).max(80.0);
+            let r = ui.add(egui::TextEdit::singleline(&mut self.new_title).hint_text("Nova tarefa para este dia...").desired_width(width));
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if (ui.button("Criar").clicked() || enter) && !self.new_title.trim().is_empty() {
                 store.add(self.new_title.trim().to_owned(), Some(d));
@@ -343,7 +396,7 @@ impl Planner {
             }
         });
         ui.separator();
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             if self.tasks_on(store, d).is_empty() {
                 ui.weak("Nenhuma tarefa neste dia.");
             }
@@ -381,7 +434,8 @@ impl Planner {
                             text = text.underline().strong().color(OVERDUE_TEXT);
                         }
                         let sense = if can_drag { Sense::click_and_drag() } else { Sense::click() };
-                        let title = ui.add(egui::Label::new(text).selectable(false).sense(sense));
+                        // Título longo vira "…" e mostra o texto inteiro ao passar o mouse.
+                        let title = ui.add(egui::Label::new(text).selectable(false).sense(sense).truncate());
                         let title = title.on_hover_cursor(if can_drag { egui::CursorIcon::Grab } else { egui::CursorIcon::PointingHand });
                         if title.drag_started() {
                             self.drag = Some((t.id, d));

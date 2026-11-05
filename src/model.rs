@@ -281,6 +281,16 @@ impl Store {
         self.dirty = true;
     }
 
+    /// Desfaz uma mudança: a tarefa volta como estava e, se foi excluída, para a posição de antes.
+    pub fn restore(&mut self, task: Task, index: usize) {
+        if let Some(p) = self.tasks.iter().position(|t| t.id == task.id) {
+            self.tasks[p] = task;
+        } else {
+            self.tasks.insert(index.min(self.tasks.len()), task);
+        }
+        self.dirty = true;
+    }
+
     pub fn all_tags(&self) -> Vec<String> {
         let mut v: Vec<String> = self.tasks.iter().flat_map(|t| t.tags.iter().cloned()).collect();
         v.sort_by_key(|t| t.to_lowercase());
@@ -438,6 +448,20 @@ mod tests {
         assert_eq!(titles(&s), ["b", "a", "c"]);
         s.move_task(ids[1], ids[2]); // e desce para a de "c"
         assert_eq!(titles(&s), ["a", "c", "b"]);
+    }
+
+    #[test]
+    fn desfazer_devolve_a_tarefa_ao_lugar() {
+        let mut s = Store::default();
+        let ids: Vec<u64> = ["a", "b", "c"].iter().map(|t| s.add((*t).into(), None)).collect();
+        let copy = s.tasks[1].clone();
+        s.remove(ids[1]);
+        s.restore(copy.clone(), 1);
+        assert_eq!(s.tasks[1].title, "b");
+        s.tasks[1].done = true;
+        s.restore(copy, 1); // já existe: só volta ao estado de antes
+        assert!(!s.tasks[1].done);
+        assert_eq!(s.tasks.len(), 3);
     }
 
     #[test]

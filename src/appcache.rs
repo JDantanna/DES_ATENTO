@@ -1,4 +1,4 @@
-//! Cache em disco do que o Coach descobre sobre cada programa: o nome real, de qual ícone ele usa
+//! Cache em disco do que o Monitoramento descobre sobre cada programa: o nome real, de qual ícone ele usa
 //! e os próprios ícones (PNG). Assim nada precisa ser procurado de novo a cada abertura.
 //! Ícones de sites vêm da internet uma única vez por site e ficam guardados.
 

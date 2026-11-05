@@ -9,6 +9,11 @@ on:
 jobs:
   check:
     runs-on: windows-latest
+    # Para publicar as capturas de tela no ramo ci-capturas.
+    permissions:
+      contents: write
+    env:
+      NAVI_CAPTURAS: ${{ github.workspace }}\capturas
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -28,3 +33,15 @@ jobs:
             }
           }
           exit $code
+      # As telas desenhadas pelo teste viram um único commit no ramo ci-capturas (a main não muda).
+      - name: Publicar capturas
+        if: always() && hashFiles('capturas/*.png') != ''
+        shell: pwsh
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          Set-Location capturas
+          git init -q -b ci-capturas
+          git add .
+          git -c user.name=ci -c user.email=ci@localhost commit -q -m "Capturas de $env:GITHUB_SHA"
+          git push -q --force "https://x-access-token:$env:TOKEN@github.com/$env:GITHUB_REPOSITORY.git" ci-capturas

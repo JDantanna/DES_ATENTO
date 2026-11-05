@@ -1,7 +1,7 @@
 //! Moldura própria da janela: fundo arredondado, barra de título, botões de
 //! janela e áreas de redimensionamento (a janela do Windows é sem decoração).
 
-use eframe::egui::{self, Color32, CursorIcon, Rect, Response, Sense, Stroke, vec2};
+use eframe::egui::{self, Color32, CursorIcon, Pos2, Rect, Response, Sense, Stroke, vec2};
 use egui::viewport::ResizeDirection as Dir;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
@@ -25,6 +25,27 @@ pub enum Glyph {
     ChevronUp,
     /// Divisa para baixo: expandir.
     ChevronDown,
+    /// Divisa para a direita: seção recolhida.
+    ChevronRight,
+    /// Seta para a esquerda: voltar.
+    Back,
+    Plus,
+    /// Sol: tarefas de hoje.
+    Today,
+    /// Calendário: próximos dias.
+    Upcoming,
+    /// Linhas: todas as tarefas.
+    All,
+    /// Círculo com visto: concluídas.
+    Done,
+    /// Pontos que indicam que a linha pode ser arrastada.
+    Grip,
+    /// Sino: a tarefa tem aviso.
+    Bell,
+    /// Setas em círculo, pequenas: a tarefa se repete.
+    Repeat,
+    /// Visto: itens do checklist.
+    Check,
 }
 
 pub fn window_button(ui: &mut egui::Ui, glyph: Glyph) -> Response {
@@ -44,11 +65,87 @@ pub fn icon_button(ui: &mut egui::Ui, glyph: Glyph, spin: f32) -> Response {
     if let Some(bg) = bg {
         ui.painter().rect_filled(rect.shrink2(vec2(2.0, 0.0)), 7.0, bg);
     }
-    let c = rect.center();
     let col = if hot { Color32::WHITE } else { Color32::from_gray(185) };
+    paint_glyph(ui.painter(), rect.center(), glyph, col, spin);
+    resp
+}
+
+/// Desenha um ícone centrado em `c`, sem fundo nem área de clique.
+pub fn paint_glyph(p: &egui::Painter, c: Pos2, glyph: Glyph, col: Color32, spin: f32) {
     let st = Stroke::new(1.4, col);
-    let p = ui.painter();
     match glyph {
+        Glyph::ChevronRight => {
+            p.line_segment([c + vec2(-2.5, -5.0), c + vec2(2.5, 0.0)], st);
+            p.line_segment([c + vec2(-2.5, 5.0), c + vec2(2.5, 0.0)], st);
+        }
+        Glyph::Back => {
+            p.line_segment([c + vec2(-6.0, 0.0), c + vec2(6.0, 0.0)], st);
+            p.line_segment([c + vec2(-6.0, 0.0), c + vec2(-1.5, -4.5)], st);
+            p.line_segment([c + vec2(-6.0, 0.0), c + vec2(-1.5, 4.5)], st);
+        }
+        Glyph::Plus => {
+            p.line_segment([c + vec2(-5.5, 0.0), c + vec2(5.5, 0.0)], st);
+            p.line_segment([c + vec2(0.0, -5.5), c + vec2(0.0, 5.5)], st);
+        }
+        Glyph::Today => {
+            p.circle_stroke(c, 3.2, st);
+            for i in 0..8 {
+                let a = i as f32 * std::f32::consts::FRAC_PI_4;
+                let d = vec2(a.cos(), a.sin());
+                p.line_segment([c + d * 5.2, c + d * 7.0], st);
+            }
+        }
+        Glyph::Upcoming => {
+            p.rect_stroke(Rect::from_center_size(c + vec2(0.0, 0.5), vec2(13.0, 12.0)), 2.5, st, egui::StrokeKind::Middle);
+            p.line_segment([c + vec2(-6.5, -2.0), c + vec2(6.5, -2.0)], st);
+            p.line_segment([c + vec2(-3.0, -7.0), c + vec2(-3.0, -4.0)], st);
+            p.line_segment([c + vec2(3.0, -7.0), c + vec2(3.0, -4.0)], st);
+        }
+        Glyph::All => {
+            for y in [-4.5, 0.0, 4.5] {
+                p.circle_filled(c + vec2(-5.5, y), 1.1, col);
+                p.line_segment([c + vec2(-2.5, y), c + vec2(6.5, y)], st);
+            }
+        }
+        Glyph::Done => {
+            p.circle_stroke(c, 6.8, st);
+            p.line_segment([c + vec2(-3.2, 0.2), c + vec2(-0.8, 2.6)], st);
+            p.line_segment([c + vec2(-0.8, 2.6), c + vec2(3.4, -2.6)], st);
+        }
+        Glyph::Grip => {
+            for x in [-2.0, 2.0] {
+                for y in [-4.0, 0.0, 4.0] {
+                    p.circle_filled(c + vec2(x, y), 0.95, col);
+                }
+            }
+        }
+        Glyph::Bell => {
+            let pts = vec![c + vec2(-3.6, 2.4), c + vec2(-3.0, -2.0), c + vec2(-1.4, -4.0), c + vec2(1.4, -4.0), c + vec2(3.0, -2.0), c + vec2(3.6, 2.4)];
+            p.add(egui::Shape::line(pts, Stroke::new(1.1, col)));
+            p.line_segment([c + vec2(-4.8, 2.6), c + vec2(4.8, 2.6)], Stroke::new(1.1, col));
+            p.circle_filled(c + vec2(0.0, 4.3), 0.9, col);
+        }
+        Glyph::Repeat => {
+            let r = 4.2;
+            let thin = Stroke::new(1.1, col);
+            for start in [0.3f32, 0.3 + std::f32::consts::PI] {
+                let pts: Vec<_> = (0..=8).map(|i| {
+                    let a = start + 2.4 * i as f32 / 8.0;
+                    c + vec2(a.cos(), a.sin()) * r
+                }).collect();
+                let tip = pts[8];
+                let a = start + 2.4;
+                let (dir, out) = (vec2(-a.sin(), a.cos()), vec2(a.cos(), a.sin()));
+                p.add(egui::Shape::line(pts, thin));
+                p.line_segment([tip + dir * 1.2, tip - dir * 1.2 + out * 2.0], thin);
+                p.line_segment([tip + dir * 1.2, tip - dir * 1.2 - out * 2.0], thin);
+            }
+        }
+        Glyph::Check => {
+            let thin = Stroke::new(1.3, col);
+            p.line_segment([c + vec2(-3.8, 0.2), c + vec2(-1.0, 3.0)], thin);
+            p.line_segment([c + vec2(-1.0, 3.0), c + vec2(4.0, -3.0)], thin);
+        }
         Glyph::Minimize => {
             p.line_segment([c + vec2(-5.0, 3.0), c + vec2(5.0, 3.0)], st);
         }
@@ -104,7 +201,14 @@ pub fn icon_button(ui: &mut egui::Ui, glyph: Glyph, spin: f32) -> Response {
             p.line_segment([c + vec2(1.5, 0.0), c + vec2(1.3, 4.5)], thin);
         }
     }
-    resp
+}
+
+/// Área de layout com limite próprio: o que passar de `rect` é cortado, em vez de invadir o vizinho.
+pub fn region<R>(ui: &mut egui::Ui, rect: Rect, salt: impl std::hash::Hash + std::fmt::Debug, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let builder = egui::UiBuilder::new().id_salt(salt).max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min));
+    let mut child = ui.new_child(builder);
+    child.set_clip_rect(rect.intersect(ui.clip_rect()));
+    add(&mut child)
 }
 
 pub fn close_button(ui: &mut egui::Ui) -> Response {

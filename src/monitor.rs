@@ -26,8 +26,8 @@ impl Range {
     }
 }
 
-const WIDGET_ID: &str = "coach_widget";
-const WIDGET_TITLE: &str = "Navi · Coach";
+const WIDGET_ID: &str = "monitor_widget";
+const WIDGET_TITLE: &str = "Navi · Monitoramento";
 /// Largura de referência do widget (as fontes escalam em relação a ela).
 const WIDGET_W: f32 = 340.0;
 /// Altura do formato pequeno (faixa com o programa e o cronômetro).
@@ -40,7 +40,7 @@ const MIN_H: f32 = 48.0;
 /// Nome com que o próprio app aparece no rastreador.
 const APP_NAME: &str = "Navi";
 
-pub struct CoachView {
+pub struct MonitorView {
     range: Range,
     widget: bool,
     widget_list: bool,
@@ -74,7 +74,7 @@ pub struct CoachView {
     panel: Option<Panel>,
     /// Programa cujo ícone será escolhido em seguida, no seletor de arquivo.
     pending_pick: Option<String>,
-    /// Erro a mostrar no Coach (imagem de ícone que não pôde ser lida).
+    /// Erro a mostrar no Monitoramento (imagem de ícone que não pôde ser lida).
     notice: Option<String>,
 }
 
@@ -165,9 +165,9 @@ fn save_colors(colors: &AppColors) {
 
 const PANEL_TITLE: &str = "Navi · Programa";
 const PANEL_W: f32 = 340.0;
-/// Altura de cada linha de programa no Coach.
+/// Altura de cada linha de programa no Monitoramento.
 const ROW_H: f32 = 44.0;
-/// Cinza dos textos secundários do Coach, com contraste suficiente sobre o fundo escuro.
+/// Cinza dos textos secundários do Monitoramento, com contraste suficiente sobre o fundo escuro.
 const DIM: Color32 = Color32::from_gray(160);
 
 /// Painel de um programa (nome, ícone, cor), aberto com o botão direito. É uma janela de verdade
@@ -309,7 +309,7 @@ pub fn clock(secs: u64) -> String {
     format!("{:02}:{:02}:{:02}", secs / 3600, secs % 3600 / 60, secs % 60)
 }
 
-impl CoachView {
+impl MonitorView {
     pub fn new(small: bool) -> Self {
         Self {
             range: Range::Hoje,
@@ -336,6 +336,22 @@ impl CoachView {
 
     pub fn take_opened(&mut self) -> bool {
         std::mem::take(&mut self.just_opened)
+    }
+
+    /// Abre o widget (a janela principal acabou de sair de cena).
+    pub fn open_widget(&mut self) {
+        if !self.widget {
+            self.widget = true;
+            self.widget_fresh = true;
+        }
+        self.closing = false;
+    }
+
+    /// Fecha o widget esmaecendo (a janela principal voltou).
+    pub fn close_widget(&mut self) {
+        if self.widget {
+            self.closing = true;
+        }
     }
 
     pub fn take_open_app(&mut self) -> bool {
@@ -381,7 +397,7 @@ impl CoachView {
 
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 // O número principal primeiro; o período e a quantidade de programas em segundo plano.
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(egui::RichText::new(fmt(total)).size(28.0).strong());
                     let period = match self.range {
                         Range::Hoje => "hoje",
@@ -423,7 +439,7 @@ impl CoachView {
         });
     }
 
-    /// Faixa no topo do Coach: mostra que o rastreador está rodando (mesmo com o widget fechado) ou pausado.
+    /// Faixa no topo do Monitoramento: mostra que o rastreador está rodando (mesmo com o widget fechado) ou pausado.
     fn status_banner(&mut self, ui: &mut egui::Ui, now: &crate::tracker::Now) {
         let tracking = !now.idle && now.current.is_some();
         let tint = if tracking { Color32::from_rgb(80, 200, 120) } else { Color32::from_rgb(230, 170, 60) };
@@ -487,7 +503,7 @@ impl CoachView {
         }
         let Some(mut p) = self.panel.take() else { return };
         let ctx = ui.ctx().clone();
-        let id = egui::ViewportId::from_hash_of("coach_painel_programa");
+        let id = egui::ViewportId::from_hash_of("monitor_painel_programa");
         let builder = egui::ViewportBuilder::default()
             .with_title(PANEL_TITLE)
             .with_inner_size([PANEL_W, p.height()])
@@ -705,6 +721,8 @@ impl CoachView {
             .with_decorations(false)
             .with_transparent(true)
             .with_always_on_top()
+            // Surge sem roubar o foco de quem estiver em uso quando o Navi é minimizado.
+            .with_active(false)
             .with_resizable(true);
         let mut close = false;
         let mut toggle_list = false;
@@ -715,7 +733,7 @@ impl CoachView {
         // Sem nada sendo rastreado (ocioso ou sem programa), o widget fica vermelho.
         let tracking = !data.now.idle && data.now.current.is_some();
         let tracked_name = if tracking { data.now.current.clone() } else { None };
-        // Cor de fundo escolhida para o programa em uso (botão direito no widget ou no Coach).
+        // Cor de fundo escolhida para o programa em uso (botão direito no widget ou no Monitoramento).
         let program = tracked_name.as_deref().and_then(|n| self.colors.get(n)).copied();
         let mut open_panel = None;
         let (fill, time_color) = if tracking {

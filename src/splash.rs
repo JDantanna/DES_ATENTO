@@ -92,8 +92,14 @@ impl Splash {
 
         egui::CentralPanel::default().show(root, |ui| {
             let rect = ui.max_rect();
-            let line = 42.0;
-            let block = 84.0 + 24.0 + self.tasks.len() as f32 * line + if self.behind > 0 { 40.0 } else { 0.0 };
+            let width_of = |text: &str, size: f32| ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(size), Color32::WHITE).size().x;
+            let widest = self.tasks.iter().map(|(s, _)| width_of(s, 30.0)).fold(0.0, f32::max);
+            let height = 84.0 + 24.0 + self.tasks.len() as f32 * 42.0 + if self.behind > 0 { 40.0 } else { 0.0 };
+            // Em janela pequena, tudo encolhe junto; linhas muito longas ainda terminam em "…".
+            let room = (rect.width() - 48.0).max(1.0);
+            let k = (room / width_of(&self.header, 28.0)).min((rect.height() - 72.0).max(1.0) / height).clamp(0.45, 1.0);
+            let line = 42.0 * k;
+            let block = height * k;
             let top = rect.center().y - block / 2.0;
             let x = rect.center().x;
             let paint = |text: &str, pos: egui::Pos2, align: Align2, size: f32, a: f32| {
@@ -102,30 +108,33 @@ impl Splash {
                     pos + egui::vec2(0.0, (1.0 - a) * 8.0),
                     align,
                     text,
-                    FontId::proportional(size),
+                    FontId::proportional(size * k),
                     Color32::WHITE.gamma_multiply(a),
                 );
             };
             // Título centralizado, cada linha no centro (um texto de várias linhas sairia alinhado à esquerda).
             let head_a = smooth(t / HEAD_FADE_IN);
             paint(&self.header, egui::pos2(x, top), Align2::CENTER_TOP, 28.0, head_a);
-            paint("Suas tarefas para hoje são", egui::pos2(x, top + 40.0), Align2::CENTER_TOP, 28.0, head_a);
+            paint("Suas tarefas para hoje são", egui::pos2(x, top + 40.0 * k), Align2::CENTER_TOP, 28.0, head_a);
             // Tarefas alinhadas à esquerda, com marcador, num bloco centralizado pela linha mais larga.
-            let widest = self
-                .tasks
-                .iter()
-                .map(|(s, _)| ui.painter().layout_no_wrap(s.clone(), FontId::proportional(30.0), Color32::WHITE).size().x)
-                .fold(0.0, f32::max);
-            let left = x - (widest + BULLET_W) / 2.0;
+            let bullet_w = BULLET_W * k;
+            let left = x - ((widest * k + bullet_w).min(room)) / 2.0;
+            let clipped = ui.painter().with_clip_rect(egui::Rect::from_min_max(egui::pos2(rect.left() + 24.0, rect.top()), egui::pos2(rect.right() - 24.0, rect.bottom())));
             for (i, (task, bullet)) in self.tasks.iter().enumerate() {
                 let a = smooth((t - self.task_start(i)) / TASK_FADE_IN);
-                let y = top + 108.0 + i as f32 * line;
+                let y = top + 108.0 * k + i as f32 * line;
+                let alpha = (a * master).clamp(0.0, 1.0);
                 if *bullet {
-                    let alpha = (a * master).clamp(0.0, 1.0);
-                    ui.painter().circle_filled(egui::pos2(left + 8.0, y + 20.0 + (1.0 - a) * 8.0), 5.0, ACCENT.gamma_multiply(alpha));
+                    ui.painter().circle_filled(egui::pos2(left + 8.0 * k, y + 20.0 * k + (1.0 - a) * 8.0), 5.0 * k, ACCENT.gamma_multiply(alpha));
                 }
-                let text_x = if *bullet { left + BULLET_W } else { left };
-                paint(task, egui::pos2(text_x, y), Align2::LEFT_TOP, 30.0, a);
+                let text_x = if *bullet { left + bullet_w } else { left };
+                let mut job = egui::text::LayoutJob::simple_singleline(task.clone(), FontId::proportional(30.0 * k), Color32::WHITE);
+                job.wrap.max_width = (rect.right() - 24.0 - text_x).max(40.0);
+                job.wrap.max_rows = 1;
+                job.wrap.break_anywhere = true;
+                job.wrap.overflow_character = Some('…');
+                let galley = ui.painter().layout_job(job);
+                clipped.galley(egui::pos2(text_x, y + (1.0 - a) * 8.0), galley, Color32::WHITE.gamma_multiply(alpha));
             }
             // Pendências de dias anteriores: só um aviso, sem listar.
             if self.behind > 0 {
@@ -137,10 +146,10 @@ impl Splash {
                 };
                 let a = (a * master).clamp(0.0, 1.0);
                 ui.painter().text(
-                    egui::pos2(x, top + 108.0 + self.tasks.len() as f32 * line + 22.0),
+                    egui::pos2(x, top + 108.0 * k + self.tasks.len() as f32 * line + 22.0 * k),
                     Align2::CENTER_TOP,
                     text,
-                    FontId::proportional(17.0),
+                    FontId::proportional(17.0 * k),
                     Color32::from_rgb(240, 180, 90).gamma_multiply(a),
                 );
             }
