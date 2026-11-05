@@ -46,6 +46,8 @@ pub enum Glyph {
     Repeat,
     /// Visto: itens do checklist.
     Check,
+    /// Nuvem: backup.
+    Cloud,
 }
 
 pub fn window_button(ui: &mut egui::Ui, glyph: Glyph) -> Response {
@@ -140,6 +142,23 @@ pub fn paint_glyph(p: &egui::Painter, c: Pos2, glyph: Glyph, col: Color32, spin:
                 p.line_segment([tip + dir * 1.2, tip - dir * 1.2 + out * 2.0], thin);
                 p.line_segment([tip + dir * 1.2, tip - dir * 1.2 - out * 2.0], thin);
             }
+        }
+        Glyph::Cloud => {
+            // Três arcos e a base; os ângulos crescem no sentido horário, com o y da tela para baixo.
+            for (center, r, from, to) in [
+                (vec2(-4.4, 1.4), 3.0f32, 90.0f32, 285.0f32),
+                (vec2(0.0, -1.0), 4.2, 195.0, 340.0),
+                (vec2(4.6, 1.7), 2.7, 255.0, 450.0),
+            ] {
+                let pts: Vec<_> = (0..=10)
+                    .map(|i| {
+                        let a = (from + (to - from) * i as f32 / 10.0).to_radians();
+                        c + center + vec2(a.cos(), a.sin()) * r
+                    })
+                    .collect();
+                p.add(egui::Shape::line(pts, st));
+            }
+            p.line_segment([c + vec2(-4.4, 4.4), c + vec2(4.6, 4.4)], st);
         }
         Glyph::Check => {
             let thin = Stroke::new(1.3, col);

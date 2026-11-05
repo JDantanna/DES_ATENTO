@@ -17,6 +17,8 @@ pub enum State {
     UpToDate,
     Available { version: String, url: String },
     Downloading,
+    /// O instalador já está rodando: o app precisa fechar, sem passar pela pergunta de sair.
+    Closing,
     Error(String),
 }
 
@@ -101,13 +103,9 @@ impl Updater {
                 .stdin(Stdio::null())
                 .spawn()
                 .is_ok();
-            if started {
-                // Salva o uso antes de sair; o instalador reabre o app ao terminar.
-                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
-            } else {
-                this.set(State::Error("Não foi possível iniciar o instalador.".into()));
-                ctx.request_repaint();
-            }
+            // O instalador reabre o app ao terminar.
+            this.set(if started { State::Closing } else { State::Error("Não foi possível iniciar o instalador.".into()) });
+            ctx.request_repaint();
         });
     }
 }

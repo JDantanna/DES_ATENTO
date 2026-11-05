@@ -201,6 +201,12 @@ fn telas_em_todos_os_tamanhos() {
         capture(&mut app, &ctx, &mut atlas, "abertura", w, h, &mut clock);
         app.splash = None;
         capture(&mut app, &ctx, &mut atlas, "tarefas", w, h, &mut clock);
+        app.backup.open = true;
+        capture(&mut app, &ctx, &mut atlas, "backup_desligado", w, h, &mut clock);
+        app.settings.backup_dir = Some("G:\\Meu Drive\\Navi Backup".into());
+        app.settings.last_backup = Some(Local::now().naive_local());
+        capture(&mut app, &ctx, &mut atlas, "backup_ativo", w, h, &mut clock);
+        app.backup.open = false;
         app.tasks.open(main);
         capture(&mut app, &ctx, &mut atlas, "tarefas_detalhes", w, h, &mut clock);
         app.tab = Tab::Calendario;

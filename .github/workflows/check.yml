@@ -33,6 +33,20 @@ jobs:
             }
           }
           exit $code
+      # Revisão automática do código: aponta o que melhorar, sem reprovar o envio.
+      - name: Clippy
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $env:CARGO_TERM_COLOR = 'never'
+          rustup component add clippy
+          cargo clippy --all-targets *>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath clippy.txt
+          Select-String -Path clippy.txt -Pattern '^warning' -Context 0,1 | Where-Object { $_.Line -notmatch 'generated \d+ warning' } | Select-Object -First 10 | ForEach-Object {
+            Write-Output "::warning::$($_.Line) | $($_.Context.PostContext)"
+          }
+          exit 0
       # As telas desenhadas pelo teste viram um único commit no ramo ci-capturas (a main não muda).
       - name: Publicar capturas
         if: always() && hashFiles('capturas/*.png') != ''

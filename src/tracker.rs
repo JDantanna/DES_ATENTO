@@ -55,6 +55,8 @@ struct Shared {
     /// O que fica guardado em disco: nomes, apelidos e de onde vem o ícone de cada programa.
     cache: Cache,
     cache_dirty: bool,
+    /// Nada mais é gravado em disco: os arquivos estão sendo substituídos por um backup.
+    frozen: bool,
 }
 
 impl Shared {
@@ -247,7 +249,7 @@ impl Tracker {
                     }
                 }
                 ticks += 1;
-                if ticks % SAVE_EVERY == 0 {
+                if ticks % SAVE_EVERY == 0 && !s.frozen {
                     let usage = s.usage.clone();
                     let cache = std::mem::take(&mut s.cache_dirty).then(|| s.cache.clone());
                     drop(s);
@@ -265,6 +267,11 @@ impl Tracker {
         let s = self.shared.lock().unwrap();
         save(&s.usage);
         s.cache.save();
+    }
+
+    /// Para de gravar em disco: o app está fechando para restaurar um backup.
+    pub fn freeze(&self) {
+        self.shared.lock().unwrap().frozen = true;
     }
 
     /// Renomeia o programa para sempre e grava na hora.

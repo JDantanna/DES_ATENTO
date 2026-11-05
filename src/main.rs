@@ -2,6 +2,7 @@
 
 mod appcache;
 mod appname;
+mod backup;
 #[cfg(test)]
 mod capturas;
 mod chrome;
@@ -33,9 +34,13 @@ use updater::{State, Updater};
 /// Tamanho mínimo da janela, em pontos da interface (acompanha a escala escolhida).
 const MIN_WINDOW: egui::Vec2 = vec2(480.0, 420.0);
 /// Abaixo desta largura, as abas descem para uma segunda linha.
-const TABS_INLINE_W: f32 = 700.0;
+const TABS_INLINE_W: f32 = 740.0;
 /// O mesmo, com o botão de atualizar (mais largo) à mostra.
-const TABS_INLINE_BUSY_W: f32 = 900.0;
+const TABS_INLINE_BUSY_W: f32 = 940.0;
+/// Gravação das tarefas: espera este tempo depois da primeira mudança, para não gravar a cada tecla.
+const SAVE_DELAY_SECS: f64 = 1.0;
+/// Quanto o fechamento do app espera pelo último backup (a unidade da nuvem pode estar lenta).
+const EXIT_BACKUP_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(PartialEq, Clone, Copy)]
 pub(crate) enum Tab {
@@ -59,7 +64,12 @@ pub(crate) struct App {
     ask_close: bool,
     /// A saída já foi confirmada: o pedido de fechar passa direto.
     quitting: bool,
-    settings: Settings,
+    pub(crate) settings: Settings,
+    pub(crate) backup: backup::Backup,
+    /// Backup a colocar no lugar dos dados quando o app terminar de fechar.
+    restore_pending: Option<backup::Prepared>,
+    /// Desde quando há mudanças nas tarefas ainda não gravadas (no relógio da interface).
+    dirty_since: Option<f64>,
     scale_dirty: bool,
     /// Etapa da volta da bandeja com esmaecer (0 = nenhuma).
     restore_stage: u8,
@@ -99,6 +109,9 @@ impl App {
             ask_close: false,
             quitting: false,
             settings,
+            backup: backup::Backup::new(),
+            restore_pending: None,
+            dirty_since: None,
             scale_dirty: false,
             restore_stage: 0,
             frame_fixed: false,
@@ -278,6 +291,92 @@ impl App {
         }
     }
 
+    /// Grava as mudanças pendentes das tarefas agora.
+    fn save_store(&mut self) {
+        self.dirty_since = None;
+        if self.store.dirty {
+            self.store.save();
+        }
+    }
+
+    /// Faz o backup com os dados em disco já atualizados.
+    fn start_backup(&mut self, ctx: &egui::Context, dir: std::path::PathBuf) {
+        self.save_store();
+        self.tracker.save_now();
+        self.backup.start(dir, ctx);
+    }
+
+    /// Recolhe o resultado do backup em andamento e confere se é hora de outro.
+    fn backup_tick(&mut self, ctx: &egui::Context) {
+        if let Some(at) = self.backup.take_finished() {
+            self.settings.last_backup = Some(at);
+            self.settings.save();
+        }
+        let Some(dir) = self.settings.backup_dir.clone() else { return };
+        let time = ctx.input(|i| i.time);
+        let now = Local::now().naive_local();
+        if self.backup.check_now(time) && !self.backup.running() && backup::due(self.settings.last_backup, backup::tasks_changed_at(), now) {
+            self.start_backup(ctx, dir);
+        }
+        // Parado na bandeja, o app só acorda para a próxima conferência.
+        ctx.request_repaint_after(self.backup.until_check(time));
+    }
+
+    fn backup_requests(&mut self, ctx: &egui::Context) {
+        match self.backup.window(ctx, &mut self.settings) {
+            Some(backup::Request::BackupNow) => {
+                if let Some(dir) = self.settings.backup_dir.clone() {
+                    self.start_backup(ctx, dir);
+                }
+            }
+            Some(backup::Request::Restore(prepared)) => {
+                // Só substitui os dados depois de ter uma cópia dos atuais; a troca em si acontece ao fechar.
+                self.save_store();
+                self.tracker.save_now();
+                match backup::safety_copy(&prepared, &self.settings, &model::data_dir(), Local::now().naive_local()) {
+                    Ok(_) => {
+                        self.restore_pending = Some(prepared);
+                        self.quit(ctx);
+                    }
+                    Err(e) => self.backup.set_error(format!("Não foi possível copiar os dados atuais, então nada foi alterado. {e}")),
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Último passo ao fechar para restaurar: troca os arquivos e abre o app de novo.
+    fn finish_restore(&mut self, prepared: backup::Prepared) {
+        self.tracker.freeze();
+        let data = model::data_dir();
+        if backup::commit(&prepared, &data).is_ok() {
+            // A pasta de backup é desta máquina: o backup restaurado pode ter vindo de outro computador.
+            let mut restored = Settings::load();
+            restored.backup_dir = self.settings.backup_dir.take();
+            restored.save();
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::process::Command::new(exe).spawn();
+        }
+    }
+
+    /// Ao fechar, as tarefas mudadas desde o último backup vão para a nuvem, sem prender o fechamento.
+    fn final_backup(&mut self) {
+        let Some(dir) = self.settings.backup_dir.clone() else { return };
+        if self.backup.running() || !backup::changed_since(self.settings.last_backup, backup::tasks_changed_at()) {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let now = Local::now().naive_local();
+            let _ = tx.send(backup::create(&dir, &model::data_dir(), now).map(|_| now));
+        });
+        if let Ok(Ok(at)) = rx.recv_timeout(EXIT_BACKUP_WAIT) {
+            self.settings.last_backup = Some(at);
+            self.settings.save();
+        }
+    }
+
     /// Encerra o app de verdade (sem passar pela pergunta).
     fn quit(&mut self, ctx: &egui::Context) {
         self.quitting = true;
@@ -414,8 +513,27 @@ impl App {
                     }
                     ui.add_space(8.0);
                     self.scale_menu(ui);
-                    ui.add_space(4.0);
-                    self.update_ui(ui, width >= 1040.0);
+                    ui.add_space(2.0);
+                    let health = self.backup.health(&self.settings);
+                    let hint = match health {
+                        backup::Health::Ok => "Backup",
+                        backup::Health::Off => "Backup desligado",
+                        backup::Health::Failing => "O backup está com problema",
+                    };
+                    let cloud = chrome::icon_button(ui, chrome::Glyph::Cloud, 0.0).on_hover_text(hint);
+                    let dot = match health {
+                        backup::Health::Ok => None,
+                        backup::Health::Off => Some(Color32::from_rgb(240, 180, 90)),
+                        backup::Health::Failing => Some(Color32::from_rgb(235, 80, 80)),
+                    };
+                    if let Some(dot) = dot {
+                        ui.painter().circle_filled(cloud.rect.right_top() + vec2(-9.0, 7.0), 3.5, dot);
+                    }
+                    if cloud.clicked() {
+                        self.backup.open = !self.backup.open;
+                    }
+                    ui.add_space(2.0);
+                    self.update_ui(ui, width >= 1080.0);
                 });
             });
         });
@@ -457,6 +575,9 @@ impl App {
             Some(tray::Request::Restore) => self.restore(&ctx),
             Some(tray::Request::Quit) => self.quit(&ctx),
             None => {}
+        }
+        if self.updater.state() == State::Closing {
+            self.quit(&ctx);
         }
         // Alt+F4 e afins também passam pela pergunta (menos quando a saída já foi confirmada).
         if !self.quitting && ctx.input(|i| i.viewport().close_requested()) {
@@ -503,8 +624,17 @@ impl App {
             self.close_dialog(&ctx);
         }
 
+        self.backup_requests(&ctx);
+        self.backup_tick(&ctx);
+
         if self.store.dirty {
-            self.store.save();
+            let time = ctx.input(|i| i.time);
+            let since = *self.dirty_since.get_or_insert(time);
+            if time - since >= SAVE_DELAY_SECS {
+                self.save_store();
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(SAVE_DELAY_SECS));
+            }
         }
     }
 }
@@ -519,7 +649,12 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_store();
         self.tracker.save_now();
+        match self.restore_pending.take() {
+            Some(prepared) => self.finish_restore(prepared),
+            None => self.final_backup(),
+        }
     }
 }
 

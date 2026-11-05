@@ -349,10 +349,14 @@ impl Store {
     }
 
     pub fn load() -> Self {
-        std::fs::read_to_string(Self::path())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        let path = Self::path();
+        let Ok(text) = std::fs::read_to_string(&path) else { return Self::default() };
+        serde_json::from_str(&text).unwrap_or_else(|_| {
+            // Arquivo ilegível: guarda uma cópia antes que a próxima gravação o substitua por uma lista vazia.
+            let stamp = Local::now().format("%Y%m%d_%H%M%S");
+            let _ = std::fs::copy(&path, path.with_file_name(format!("tasks_ilegivel_{stamp}.json")));
+            Self::default()
+        })
     }
 
     pub fn save(&mut self) {
@@ -513,7 +517,7 @@ mod tests {
 }
 
 /// Preferências do app (`settings.json`).
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct Settings {
     /// Escolha do botão de minimizar: `Some(true)` bandeja, `Some(false)` só minimizar, `None` perguntar.
@@ -524,11 +528,15 @@ pub struct Settings {
     pub tray_notice_shown: bool,
     /// O widget usa o formato pequeno (faixa) em vez do médio.
     pub widget_small: bool,
+    /// Pasta dos backups (normalmente sincronizada com a nuvem). `None` = backup desligado.
+    pub backup_dir: Option<PathBuf>,
+    /// Quando o último backup deu certo.
+    pub last_backup: Option<NaiveDateTime>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { minimize_to_tray: None, scale: 1.0, tray_notice_shown: false, widget_small: false }
+        Self { minimize_to_tray: None, scale: 1.0, tray_notice_shown: false, widget_small: false, backup_dir: None, last_backup: None }
     }
 }
 
