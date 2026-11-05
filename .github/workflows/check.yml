@@ -14,4 +14,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Testes
-        run: cargo test --release
+        shell: pwsh
+        # Em caso de falha, repete os erros como anotações, legíveis sem baixar o log inteiro.
+        run: |
+          $ErrorActionPreference = 'Continue'
+          cargo test --release *>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath saida.txt
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            Select-String -Path saida.txt -Pattern '^error|^test .* FAILED|panicked at' -Context 0,5 | Select-Object -First 9 | ForEach-Object {
+              $text = (@($_.Line) + $_.Context.PostContext) -join ' | '
+              Write-Output "::error::$text"
+            }
+          }
+          exit $code
