@@ -464,7 +464,7 @@ impl TasksView {
         }
         self.keep_filter.clear();
 
-        let frame = egui::Frame::NONE.inner_margin(egui::Margin { left: 12, right: 12, top: 2, bottom: 12 });
+        let frame = egui::Frame::NONE.inner_margin(egui::Margin { left: 12, right: 12, top: 6, bottom: 12 });
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             // Textos não capturam o mouse: clicar ou arrastar neles vale para o que está por baixo.
             ui.style_mut().interaction.selectable_labels = false;
@@ -910,8 +910,12 @@ impl TasksView {
         job.wrap.break_anywhere = true;
         job.wrap.overflow_character = Some('…');
         let title = p.layout_job(job);
-        let h = title.size().y;
+        let (h, cut) = (title.size().y, title.elided);
         p.galley(pos2(text_left, title_y - h / 2.0), title, color);
+        // Título cortado: o texto inteiro aparece ao passar o mouse.
+        if cut {
+            resp.clone().on_hover_text(t.title.as_str());
+        }
 
         if has_meta {
             let y = title_y + 18.0;
@@ -1183,12 +1187,10 @@ impl TasksView {
             if back && chrome::icon_button(ui, Glyph::Back, 0.0).on_hover_text("Voltar para a lista (Esc)").clicked() {
                 close = true;
             }
-            if ui.checkbox(&mut t.done, "").on_hover_text("Concluir").changed() {
+            if ui.checkbox(&mut t.done, "Concluída").changed() {
                 t.roll_over();
                 changed = true;
             }
-            let room = ui.available_width() - if back { 90.0 } else { 130.0 };
-            changed |= ui.add(egui::TextEdit::singleline(&mut t.title).font(egui::TextStyle::Heading).desired_width(room.max(60.0))).changed();
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if !back && chrome::icon_button(ui, Glyph::Close, 0.0).on_hover_text("Fechar (Esc)").clicked() {
                     close = true;
@@ -1199,6 +1201,25 @@ impl TasksView {
                 changed |= ui.color_edit_button_srgb(&mut t.color).on_hover_text("Cor da tarefa").changed();
             });
         });
+        // O título ocupa a largura toda e quebra a linha, para um título longo ficar inteiro à vista. Enter só confirma.
+        let width = ui.available_width();
+        let title = ui.add(
+            egui::TextEdit::multiline(&mut t.title)
+                .font(egui::TextStyle::Heading)
+                .desired_rows(1)
+                .desired_width(width)
+                .return_key(None::<egui::KeyboardShortcut>),
+        );
+        if title.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            title.surrender_focus();
+        }
+        if title.changed() {
+            // Colar um texto com várias linhas não pode criar um título de várias linhas.
+            if t.title.contains(['\n', '\r']) {
+                t.title = t.title.split(['\n', '\r']).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
+            }
+            changed = true;
+        }
         ui.separator();
 
         egui::ScrollArea::vertical().id_salt("detalhes_rolagem").auto_shrink([false, false]).show(ui, |ui| {
@@ -1406,7 +1427,7 @@ impl TasksView {
             for (i, s) in t.subtasks.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
                     changed |= ui.checkbox(&mut s.done, "").changed();
-                    changed |= ui.add(egui::TextEdit::singleline(&mut s.title).desired_width((ui.available_width() - 34.0).max(40.0))).changed();
+                    changed |= ui.add(egui::TextEdit::singleline(&mut s.title).desired_width((ui.available_width() - 44.0).max(40.0))).changed();
                     if ui.small_button("×").clicked() {
                         rm = Some(i);
                     }

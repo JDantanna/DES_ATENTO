@@ -50,7 +50,7 @@ pub(crate) struct App {
     store: Store,
     pub(crate) tasks: TasksView,
     pub(crate) planner: Planner,
-    monitor: MonitorView,
+    pub(crate) monitor: MonitorView,
     tracker: Tracker,
     updater: Updater,
     tray: Option<tray::Tray>,

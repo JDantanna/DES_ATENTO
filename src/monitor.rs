@@ -338,6 +338,11 @@ impl MonitorView {
         std::mem::take(&mut self.just_opened)
     }
 
+    #[cfg(test)]
+    pub fn widget_on(&self) -> bool {
+        self.widget && !self.closing
+    }
+
     /// Abre o widget (a janela principal acabou de sair de cena).
     pub fn open_widget(&mut self) {
         if !self.widget {

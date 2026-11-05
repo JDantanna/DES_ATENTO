@@ -421,7 +421,8 @@ impl Planner {
                 .inner_margin(6.0)
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
                         // Como na lista de tarefas: concluir uma recorrente a reagenda para a próxima data.
                         if ui.checkbox(&mut t.done, "").changed() {
                             t.roll_over();
@@ -434,8 +435,8 @@ impl Planner {
                             text = text.underline().strong().color(OVERDUE_TEXT);
                         }
                         let sense = if can_drag { Sense::click_and_drag() } else { Sense::click() };
-                        // Título longo vira "…" e mostra o texto inteiro ao passar o mouse.
-                        let title = ui.add(egui::Label::new(text).selectable(false).sense(sense).truncate());
+                        // Título longo quebra a linha dentro do cartão, sem invadir a coluna ao lado.
+                        let title = ui.add(egui::Label::new(text).selectable(false).sense(sense).wrap());
                         let title = title.on_hover_cursor(if can_drag { egui::CursorIcon::Grab } else { egui::CursorIcon::PointingHand });
                         if title.drag_started() {
                             self.drag = Some((t.id, d));
@@ -454,8 +455,9 @@ impl Planner {
                     }
                     if !meta.is_empty() || !t.tags.is_empty() {
                         ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
                             if !meta.is_empty() {
-                                ui.weak(meta.trim());
+                                ui.label(egui::RichText::new(meta.trim()).small().color(Color32::from_gray(170)));
                             }
                             for tag in &t.tags {
                                 let [r, g, b] = tag_rgb(colors, tag);

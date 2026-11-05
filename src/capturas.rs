@@ -58,15 +58,24 @@ fn sample() -> (Store, u64) {
     (s, main)
 }
 
-fn frame(app: &mut App, ctx: &egui::Context, atlas: &mut Atlas, size: egui::Vec2, time: f64) -> egui::FullOutput {
-    let input = egui::RawInput {
+fn input(size: egui::Vec2, time: f64) -> egui::RawInput {
+    egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
         time: Some(time),
         predicted_dt: 1.0 / 30.0,
         focused: true,
         ..Default::default()
-    };
-    let out = ctx.run_ui(input, |ui| app.root(ui));
+    }
+}
+
+/// Os dados de exemplo nunca podem tocar nas tarefas de verdade de quem roda o teste.
+fn isolate_data() {
+    // SAFETY: nenhum outro teste depende de APPDATA, e o acesso às variáveis de ambiente passa pela mesma trava da biblioteca padrão.
+    unsafe { std::env::set_var("APPDATA", std::env::temp_dir().join("navi_capturas")) };
+}
+
+fn frame(app: &mut App, ctx: &egui::Context, atlas: &mut Atlas, size: egui::Vec2, time: f64) -> egui::FullOutput {
+    let out = ctx.run_ui(input(size, time), |ui| app.root(ui));
     for (id, deltas) in &out.textures_delta.set {
         for delta in deltas {
             let egui::ImageData::Color(image) = &delta.image;
@@ -112,7 +121,7 @@ fn rasterize(ctx: &egui::Context, out: egui::FullOutput, atlas: &Atlas, width: u
                     let wa = ((b.pos.x - fx) * (c.pos.y - fy) - (b.pos.y - fy) * (c.pos.x - fx)) / area;
                     let wb = ((c.pos.x - fx) * (a.pos.y - fy) - (c.pos.y - fy) * (a.pos.x - fx)) / area;
                     let wc = 1.0 - wa - wb;
-                    if wa < 0.0 || wb < 0.0 || wc < 0.0 || !clip.contains(egui::pos2(fx, fy)) {
+                    if wa < -1e-3 || wb < -1e-3 || wc < -1e-3 || !clip.contains(egui::pos2(fx, fy)) {
                         continue;
                     }
                     let mix = |pa: u8, pb: u8, pc: u8| pa as f32 * wa + pb as f32 * wb + pc as f32 * wc;
@@ -154,13 +163,38 @@ fn capture(app: &mut App, ctx: &egui::Context, atlas: &mut Atlas, name: &str, w:
 }
 
 #[test]
+fn widget_abre_ao_minimizar_e_fecha_ao_voltar() {
+    isolate_data();
+    let ctx = egui::Context::default();
+    let mut store = sample().0;
+    store.dirty = false;
+    let mut app = App::with(store, Settings::default(), None);
+    let mut clock = 0.0;
+    let mut run = |app: &mut App, minimized: bool| {
+        for _ in 0..4 {
+            clock += 0.25;
+            let mut raw = input(egui::vec2(1000.0, 640.0), clock);
+            let info = egui::ViewportInfo { minimized: Some(minimized), ..Default::default() };
+            raw.viewports.insert(egui::ViewportId::ROOT, info);
+            let _ = ctx.run_ui(raw, |ui| app.root(ui));
+        }
+    };
+    run(&mut app, false);
+    assert!(!app.monitor.widget_on(), "com a janela à vista, o widget fica fechado");
+    run(&mut app, true);
+    assert!(app.monitor.widget_on(), "minimizar abre o widget");
+    run(&mut app, false);
+    assert!(!app.monitor.widget_on(), "voltar fecha o widget");
+    run(&mut app, true);
+    assert!(app.monitor.widget_on(), "minimizar de novo abre de novo");
+}
+
+#[test]
 fn telas_em_todos_os_tamanhos() {
     if let Some(dir) = std::env::var_os("NAVI_CAPTURAS") {
         std::fs::create_dir_all(dir).expect("criar a pasta das capturas");
     }
-    // Os dados de exemplo nunca podem tocar nas tarefas de verdade de quem roda o teste.
-    // SAFETY: nenhum outro teste depende de APPDATA, e o acesso às variáveis de ambiente passa pela mesma trava da biblioteca padrão.
-    unsafe { std::env::set_var("APPDATA", std::env::temp_dir().join("navi_capturas")) };
+    isolate_data();
     let mut clock = 10.0;
     for (w, h) in [(1280, 780), (1000, 640), (760, 560), (480, 420)] {
         let ctx = egui::Context::default();
