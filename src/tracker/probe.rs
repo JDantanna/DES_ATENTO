@@ -29,8 +29,15 @@ const PAD_RETRY_MS: u32 = 60_000;
 /// Prepara a thread para usar COM (as sessões de áudio). Chamar uma vez, na thread do rastreador.
 pub(super) fn init() {
     // S_FALSE (já iniciada) também serve; qualquer falha só desliga o sinal de áudio.
-    unsafe {
-        CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED as u32);
+    let hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED as u32) };
+    trace(&format!("CoInitializeEx {hr:#x}"));
+}
+
+/// Nos testes, conta cada passo das sondas no stdout (o teste pai mostra isso se o processo filho cair).
+fn trace(step: &str) {
+    if cfg!(test) {
+        println!("sonda: {step}");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 }
 
@@ -115,6 +122,7 @@ impl Audio {
         unsafe {
             let mut raw: *mut c_void = std::ptr::null_mut();
             let hr = CoCreateInstance(&MMDeviceEnumerator, std::ptr::null_mut(), CLSCTX_ALL, &IID_IMMDEVICE_ENUMERATOR, &mut raw);
+            trace(&format!("CoCreateInstance {hr:#x} {raw:?}"));
             if hr < 0 || raw.is_null() {
                 return false;
             }
@@ -124,27 +132,34 @@ impl Audio {
                 let f: DefaultEndpoint = std::mem::transmute(f);
                 f(enumerator.0, eRender, eConsole, out)
             }) else {
+                trace("sem dispositivo de áudio padrão");
                 return false;
             };
+            trace("dispositivo pronto");
             // IMMDevice::Activate(IAudioSessionManager2)
             let Some(manager) = device.child(3, |f, out| {
                 let f: Activate = std::mem::transmute(f);
                 f(device.0, &IID_IAUDIO_SESSION_MANAGER2, CLSCTX_ALL, std::ptr::null(), out)
             }) else {
+                trace("sem gerenciador de sessões");
                 return false;
             };
+            trace("gerenciador pronto");
             // IAudioSessionManager2::GetSessionEnumerator (depois dos 2 métodos de IAudioSessionManager)
             let Some(sessions) = manager.child(5, |f, out| {
                 let f: NewObject = std::mem::transmute(f);
                 f(manager.0, out)
             }) else {
+                trace("sem enumerador de sessões");
                 return false;
             };
+            trace("enumerador de sessões pronto");
             let mut count = 0;
             let get_count: GetI32 = sessions.method(3);
             if get_count(sessions.0, &mut count) < 0 {
                 return false;
             }
+            trace(&format!("{count} sessões"));
             for i in 0..count {
                 // IAudioSessionEnumerator::GetSession
                 let Some(session) = sessions.child(4, |f, out| {
@@ -172,6 +187,7 @@ impl Audio {
                 if get_pid(control2.0, &mut pid) < 0 || pid == 0 {
                     continue;
                 }
+                trace(&format!("sessão {i} ativa, processo {pid}"));
                 let found = self.exe_of.entry(pid).or_insert_with(|| sys::process_exe(pid).map(|e| e.to_lowercase()));
                 if found.as_deref() == Some(exe.as_str()) {
                     return true;
