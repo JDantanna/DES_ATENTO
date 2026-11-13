@@ -1,0 +1,63 @@
+    Updating crates.io index
+   Compiling navi v0.9.8 (D:\a\DES_ATENTO\DES_ATENTO)
+    Finished `release` profile [optimized] target(s) in 2m 02s
+     Running unittests src\main.rs (target\release\build\navi/439b83332ec340c4\out\navi-439b83332ec340c4.exe)
+
+running 54 tests
+test appname::tests::nome_do_produto ... ok
+test appname::tests::sites_e_navegadores ... ok
+test appcache::tests::icone_volta_igual_do_disco ... ok
+test appname::tests::le_o_nome_real_dos_programas ... ok
+test backup::tests::quando_fazer_backup ... ok
+test backup::tests::recusa_o_que_nao_e_backup_e_nao_escapa_da_pasta ... ok
+test backup::tests::falha_na_pasta_preserva_o_backup_anterior ... ok
+test backup::tests::ida_e_volta_do_backup ... ok
+test backup::tests::so_entra_o_que_e_dado ... ok
+test capturas::widget_abre_ao_minimizar_e_fecha_ao_voltar ... ok
+test ics::tests::google_utc_and_allday ... ok
+test ics::tests::roundtrip ... ok
+test model::tests::atrasada_so_se_pendente_e_no_passado ... ok
+test model::tests::desfazer_devolve_a_tarefa_ao_lugar ... ok
+test model::tests::lista_de_hoje_poe_atrasadas_primeiro_e_ordena_por_hora ... ok
+test model::tests::mensal_no_dia_30 ... ok
+test model::tests::ordem_manual_e_por_hora ... ok
+test model::tests::proxima_data_volta_ao_30 ... ok
+test model::tests::renomear_e_remover_tags ... ok
+test model::tests::repeticao_finita_de_3_meses ... ok
+test model::tests::ultima_ocorrencia_conclui_de_vez ... ok
+test model::tests::widget_migra_do_formato_antigo_e_limita_a_opacidade ... ok
+test monitor::widget::tests::concluir_e_desfazer_pela_lista ... ok
+test monitor::widget::tests::formato_novo_volta_ao_tamanho_padrao_e_opacidade_tem_limite ... ok
+test monitor::widget::tests::linha_da_lista_mostra_hora_e_marca_atrasada ... ok
+test monitor::widget::tests::nome_que_nao_cabe_some_em_vez_de_virar_reticencias ... ok
+test notify::tests::aviso_no_dia_anterior ... ok
+test tasks::tests::data_curta_completa_o_ano ... ok
+test tasks::tests::disposicao_acompanha_a_largura ... ok
+test tasks::tests::mascara_de_data ... ok
+test tasks::tests::nova_tarefa_entende_data_hora_e_tags ... ok
+test tasks::tests::nova_tarefa_nao_inventa_data_no_meio_do_titulo ... ok
+test tasks::tests::secoes_seguem_a_data ... ok
+test tracker::engagement::tests::audio_tela_cheia_e_controle_valem_sem_teclado ... ok
+test tracker::engagement::tests::digitar_e_uso_e_parar_de_digitar_deixa_de_ser ... ok
+test tracker::engagement::tests::entrada_feita_antes_de_o_navi_abrir_ja_conta ... ok
+test tracker::engagement::tests::janela_que_rouba_o_foco_nao_conta_ate_a_pessoa_mexer_nela ... ok
+test tracker::engagement::tests::relogio_que_da_a_volta ... ok
+test tracker::engagement::tests::sem_janela_na_frente_e_ausencia ... ok
+test tracker::engagement::tests::so_consulta_os_sinais_passivos_perto_do_fim_da_folga ... ok
+test tracker::engagement::tests::trocar_de_janela_e_ficar_lendo_conta_para_a_janela_nova ... ok
+test backup::tests::guarda_so_os_ultimos_dias ... ok
+test tracker::probe::tests::sonda_audio ... ok
+test tracker::probe::tests::sonda_controle ... ok
+test tracker::probe::tests::sonda_janela_da_frente ... ok
+test tracker::tests::renomear_leva_o_historico_e_vale_para_sempre ... ok
+test updater::tests::caminho_invalido_nao_vira_versao ... ok
+test updater::tests::le_a_versao_do_redirecionamento ... ok
+test updater::tests::le_os_cabecalhos_do_curl ... ok
+test updater::tests::mensagens_de_erro_do_curl ... ok
+test tracker::probe::tests::sonda_tela_cheia ... ok
+test updater::tests::so_oferece_versao_mais_nova ... ok
+test capturas::widget_em_todos_os_formatos ... ok
+test capturas::telas_em_todos_os_tamanhos ... ok
+
+test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.13s
+
