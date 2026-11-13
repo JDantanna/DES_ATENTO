@@ -27,7 +27,7 @@ const TASKS_BG: Color32 = Color32::from_rgb(26, 29, 42);
 const TEXT: Color32 = Color32::from_gray(226);
 
 /// Texto de uma linha só, sem cortar: se não cabe em `room`, não aparece (`None`).
-fn fit_text(p: &egui::Painter, text: &str, font: FontId, color: Color32, room: f32) -> Option<Arc<egui::Galley>> {
+pub(super) fn fit_text(p: &egui::Painter, text: &str, font: FontId, color: Color32, room: f32) -> Option<Arc<egui::Galley>> {
     if room <= 0.0 {
         return None;
     }
@@ -41,7 +41,7 @@ fn has_icon(name: &str, tex: Option<egui::TextureId>) -> bool {
 }
 
 /// Desenha o ícone do programa em `rect`; `letter` põe a inicial do nome no lugar de um ícone que não existe.
-fn paint_icon(p: &egui::Painter, rect: egui::Rect, name: &str, tex: Option<egui::TextureId>, letter: bool) {
+pub(super) fn paint_icon(p: &egui::Painter, rect: egui::Rect, name: &str, tex: Option<egui::TextureId>, letter: bool) {
     if name == APP_NAME {
         crate::fairy::draw(p, rect.center(), rect.width() * 1.3, 0.0, 0.3);
     } else if let Some(id) = tex {
@@ -61,8 +61,38 @@ struct Look<'a> {
     clock: &'a str,
     time_color: Color32,
     tasks_open: bool,
+    /// Por que o programa conta (ou não) como em uso: "em uso", "aberto, sem uso", "tocando áudio"...
+    state: Option<&'static str>,
     /// Fator de escala das fontes, de acordo com a largura da janela.
     k: f32,
+}
+
+impl Look<'_> {
+    /// Texto ao passar o mouse no ícone, para quando o nome não cabe.
+    fn tip(&self) -> String {
+        match self.state {
+            Some(state) => format!("{} ({state})", self.name),
+            None => self.name.to_owned(),
+        }
+    }
+}
+
+/// O que cada formato de faixa mostra.
+struct StripOpts {
+    /// Nome do programa (se couber inteiro).
+    name: bool,
+    close: bool,
+    tasks: bool,
+}
+
+/// Escreve o motivo do estado em cinza, depois do nome, se houver espaço inteiro para ele.
+fn paint_state(p: &egui::Painter, look: &Look, x: f32, cy: f32, room: f32) {
+    if let Some(label) = look.state
+        && let Some(galley) = fit_text(p, &format!("· {label}"), FontId::proportional(12.0), DIM, room)
+    {
+        let h = galley.size().y;
+        p.galley(egui::pos2(x, cy - h / 2.0), galley, DIM);
+    }
 }
 
 /// O que o usuário pediu com um clique neste quadro.
@@ -87,10 +117,11 @@ fn mini_button(ui: &mut egui::Ui, center: egui::Pos2, glyph: chrome::Glyph, tip:
 }
 
 /// Barra e formato pequeno: uma faixa com o ícone e o cronômetro. O pequeno também mostra o nome (se couber)
-/// e os botões de tarefas e fechar, que somem quando a janela fica estreita demais para eles.
-fn strip(ui: &mut egui::Ui, full: egui::Rect, look: &Look, buttons: bool, acts: &mut Acts) {
+/// e o botão de fechar; os dois têm a seta das tarefas. Os botões somem quando a janela fica estreita demais.
+fn strip(ui: &mut egui::Ui, full: egui::Rect, look: &Look, opts: &StripOpts, acts: &mut Acts) {
     let p = ui.painter().clone();
     let (h, cy) = (full.height(), full.center().y);
+    let buttons = opts.name;
     let icon_base = if buttons { 22.0 } else { 16.0 };
     let isz = f32::min(icon_base, (h - 6.0).max(10.0));
     let inner_w = full.width() - 2.0 * PAD;
@@ -109,11 +140,11 @@ fn strip(ui: &mut egui::Ui, full: egui::Rect, look: &Look, buttons: bool, acts: 
 
     // Depois do ícone e do relógio, o que sobrar vai para os botões (fechar primeiro, depois a seta das tarefas).
     let mut spare = inner_w - (isz + GAP + clock_w);
-    let show_close = buttons && spare >= BTN_W + GAP;
+    let show_close = opts.close && spare >= BTN_W + GAP;
     if show_close {
         spare -= BTN_W + GAP;
     }
-    let show_tasks = show_close && spare >= BTN_W;
+    let show_tasks = opts.tasks && spare >= BTN_W + GAP;
     let mut right = full.right() - PAD;
     if show_close {
         if mini_button(ui, egui::pos2(right - BTN_W / 2.0, cy), chrome::Glyph::Close, "Fechar o widget e abrir o Navi", "fechar").clicked() {
@@ -133,7 +164,7 @@ fn strip(ui: &mut egui::Ui, full: egui::Rect, look: &Look, buttons: bool, acts: 
     let has = has_icon(look.name, look.tex);
     let icon_slot = if has { isz + GAP } else { 0.0 };
     let name_room = zone.width() - icon_slot - clock_w - 2.0 * GAP;
-    let name = if buttons { fit_text(&p, look.name, FontId::proportional(14.0), TEXT, name_room) } else { None };
+    let name = if opts.name { fit_text(&p, look.name, FontId::proportional(14.0), TEXT, name_room) } else { None };
     let icon_at = |x: f32| egui::Rect::from_min_size(egui::pos2(x, cy - isz / 2.0), vec2(isz, isz));
     match name {
         Some(galley) => {
@@ -143,16 +174,18 @@ fn strip(ui: &mut egui::Ui, full: egui::Rect, look: &Look, buttons: bool, acts: 
                 paint_icon(&p, icon_at(x), look.name, look.tex, false);
                 x += isz + GAP;
             }
-            let h = galley.size().y;
+            let (h, name_w) = (galley.size().y, galley.size().x);
             p.galley(egui::pos2(x, cy - h / 2.0), galley, TEXT);
-            p.galley(egui::pos2(zone.right() - clock_w, cy - clock.size().y / 2.0), clock, look.time_color);
+            let clock_x = zone.right() - clock_w;
+            paint_state(&p, look, x + name_w + 6.0, cy, clock_x - GAP - (x + name_w + 6.0));
+            p.galley(egui::pos2(clock_x, cy - clock.size().y / 2.0), clock, look.time_color);
         }
         None => {
             // O nome não cabe (ou é a barra): só o ícone, junto do cronômetro, no meio do espaço livre.
             let x0 = zone.center().x - (isz + GAP + clock_w) / 2.0;
             let icon = icon_at(x0);
             paint_icon(&p, icon, look.name, look.tex, true);
-            ui.interact(icon, ui.scope_id().with("icone"), Sense::hover()).on_hover_text(look.name);
+            ui.interact(icon, ui.scope_id().with("icone"), Sense::hover()).on_hover_text(look.tip());
             p.galley(egui::pos2(x0 + isz + GAP, cy - clock.size().y / 2.0), clock, look.time_color);
         }
     }
@@ -185,12 +218,14 @@ fn header_row(ui: &mut egui::Ui, rect: egui::Rect, look: &Look, acts: &mut Acts)
             if has {
                 paint_icon(&p, icon, look.name, look.tex, false);
             }
-            let h = galley.size().y;
+            let (h, name_w) = (galley.size().y, galley.size().x);
             p.galley(egui::pos2(rect.left() + slot, cy - h / 2.0), galley, TEXT);
+            let x = rect.left() + slot + name_w + 6.0;
+            paint_state(&p, look, x, cy, right - 4.0 - x);
         }
         None => {
             paint_icon(&p, icon, look.name, look.tex, true);
-            ui.interact(icon, ui.scope_id().with("icone"), Sense::hover()).on_hover_text(look.name);
+            ui.interact(icon, ui.scope_id().with("icone"), Sense::hover()).on_hover_text(look.tip());
         }
     }
 }
@@ -284,7 +319,10 @@ impl MonitorView {
         }
 
         let data = tracker.widget();
-        let name = if data.now.idle { "Ocioso".to_owned() } else { data.now.current.clone().unwrap_or_else(|| "–".to_owned()) };
+        // Com um programa na frente (em uso ou só aberto) aparece o nome dele e o motivo do estado; sem ninguém
+        // no computador, "Sem atividade".
+        let name = data.now.current.clone().unwrap_or_else(|| "Sem atividade".to_owned());
+        let state_label = data.now.current.is_some().then(|| data.now.state.label());
         let cur_tex = icon_tex(&mut self.icons, &ctx, data.now.icon.as_ref());
         let rows_tex: Vec<Option<egui::TextureId>> =
             data.session.iter().map(|r| icon_tex(&mut self.icons, &ctx, r.icon.as_ref())).collect();
@@ -320,6 +358,8 @@ impl MonitorView {
             .with_decorations(false)
             .with_transparent(true)
             .with_always_on_top()
+            // O widget não tem botão na barra de tarefas: com ele aberto, o Navi fica só na bandeja.
+            .with_taskbar(false)
             // Surge sem roubar o foco de quem estiver em uso quando o Navi é minimizado.
             .with_active(false)
             .with_resizable(!locked);
@@ -375,10 +415,11 @@ impl MonitorView {
             }
             // A fonte acompanha o tamanho da janela.
             let k = (full.width() / base.x).clamp(0.7, 2.4);
-            let look = Look { name: &name, tex: cur_tex, clock: &clock_text, time_color, tasks_open, k };
+            let look = Look { name: &name, tex: cur_tex, clock: &clock_text, time_color, tasks_open, state: state_label, k };
             match format {
-                WidgetFormat::Barra => strip(ui, full, &look, false, &mut acts),
-                WidgetFormat::Pequeno => strip(ui, full, &look, true, &mut acts),
+                // A barra só mostra ícone e cronômetro, mais a seta das tarefas.
+                WidgetFormat::Barra => strip(ui, full, &look, &StripOpts { name: false, close: false, tasks: true }, &mut acts),
+                WidgetFormat::Pequeno => strip(ui, full, &look, &StripOpts { name: true, close: true, tasks: true }, &mut acts),
                 WidgetFormat::Medio | WidgetFormat::Grande => {
                     card(ui, full, &look, &data, &rows_tex, format == WidgetFormat::Grande, list_open, &mut acts)
                 }

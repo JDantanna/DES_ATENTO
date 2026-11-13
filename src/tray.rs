@@ -10,9 +10,9 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GWL_EXSTYLE, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, IsIconic, SW_HIDE, SW_RESTORE, SW_SHOW,
-    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, WINDOWPLACEMENT, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    FindWindowW, GWL_EXSTYLE, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, IsIconic, SW_HIDE, SW_SHOW,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowLongPtrW, SetWindowPlacement,
+    SetWindowPos, ShowWindow, WINDOWPLACEMENT, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 const OPEN_ID: &str = "navi-open";
@@ -107,9 +107,15 @@ pub fn enter(ctx: &egui::Context, rgba: &[u8]) -> Option<Tray> {
         SetWindowPos(hwnd, std::ptr::null_mut(), -32000, -32000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         // Uma janela minimizada não pode ficar assim na bandeja (apareceria como uma barrinha no canto da tela):
-        // já fora da tela e sem botão na barra de tarefas, ela volta ao tamanho normal.
+        // já fora da tela e sem botão na barra de tarefas, ela volta ao tamanho normal, sem ser ativada, para o
+        // teclado não ir parar numa janela que ninguém vê.
         if IsIconic(hwnd) != 0 {
-            ShowWindow(hwnd, SW_RESTORE);
+            let mut placement: WINDOWPLACEMENT = std::mem::zeroed();
+            placement.length = size_of::<WINDOWPLACEMENT>() as u32;
+            if GetWindowPlacement(hwnd, &mut placement) != 0 {
+                placement.showCmd = SW_SHOWNOACTIVATE as u32;
+                SetWindowPlacement(hwnd, &placement);
+            }
         }
     }
     Some(Tray { _icon: icon })

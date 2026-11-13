@@ -107,27 +107,6 @@ fn icon_tex(cache: &mut HashMap<String, egui::TextureHandle>, ctx: &egui::Contex
     Some(tex.id())
 }
 
-fn app_icon(ui: &mut egui::Ui, tex: Option<egui::TextureId>) {
-    match tex {
-        Some(id) => {
-            ui.image((id, vec2(ICON, ICON)));
-        }
-        None => {
-            ui.allocate_space(vec2(ICON, ICON));
-        }
-    }
-}
-
-/// Ícone do programa; o próprio Navi aparece só como a fada, sem o fundo do ícone do executável.
-fn program_icon(ui: &mut egui::Ui, name: &str, tex: Option<egui::TextureId>) {
-    if name == APP_NAME {
-        let (rect, _) = ui.allocate_exact_size(vec2(ICON, ICON), Sense::hover());
-        crate::fairy::draw(ui.painter(), rect.center(), ICON * 1.3, 0.0, 0.3);
-    } else {
-        app_icon(ui, tex);
-    }
-}
-
 /// Faixas de tempo, da maior para a menor, como fração do programa mais usado: (mínimo, cor).
 const BANDS: [(f32, Color32); 4] = [
     (0.75, Color32::from_rgb(232, 92, 92)),
@@ -294,14 +273,11 @@ fn app_row(ui: &mut egui::Ui, app: &AppRow, tex: Option<egui::TextureId>, max: u
     p.galley(egui::pos2(share_x, line_y - share_h / 2.0), share, DIM);
 
     let text_x = icon.right() + 10.0;
-    let mut job = egui::text::LayoutJob::simple_singleline(app.name.clone(), FontId::proportional(14.0), strong);
-    job.wrap.max_width = (share_x - 12.0 - text_x).max(20.0);
-    job.wrap.max_rows = 1;
-    job.wrap.break_anywhere = true;
-    job.wrap.overflow_character = Some('…');
-    let name = p.layout_job(job);
-    let name_h = name.size().y;
-    p.galley(egui::pos2(text_x, line_y - name_h / 2.0), name, strong);
+    // O nome nunca termina em "…": ou aparece inteiro, ou a linha fica só com o ícone (o nome vai na dica).
+    if let Some(name) = widget::fit_text(p, &app.name, FontId::proportional(14.0), strong, share_x - 12.0 - text_x) {
+        let name_h = name.size().y;
+        p.galley(egui::pos2(text_x, line_y - name_h / 2.0), name, strong);
+    }
 
     let track = egui::Rect::from_min_max(egui::pos2(text_x, row.top() + 31.0), egui::pos2(inner.right(), row.top() + 35.0));
     p.rect_filled(track, 2.0, Color32::from_white_alpha(14));
@@ -486,7 +462,7 @@ impl MonitorView {
                     if resp.secondary_clicked() {
                         self.panel = Some(Panel::new(app.name.clone(), false, panel_pos(ui)));
                     }
-                    resp.on_hover_text("Botão direito: renomear, trocar o ícone e escolher a cor");
+                    resp.on_hover_text(format!("{}\nBotão direito: renomear, trocar o ícone e escolher a cor", app.name));
                 }
             });
         });
@@ -519,13 +495,29 @@ impl MonitorView {
                         let text = if widget_on { "widget aberto" } else { "em segundo plano" };
                         ui.label(egui::RichText::new(text).size(12.0).color(DIM));
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            if tracking {
+                            let body = egui::TextStyle::Body.resolve(ui.style());
+                            let width_of = |ui: &egui::Ui, text: &str| ui.painter().layout_no_wrap(text.to_owned(), body.clone(), Color32::WHITE).size().x;
+                            if let Some(name) = now.current.as_deref() {
+                                // Programa na frente (em uso ou só aberto): ícone, nome inteiro e o motivo do estado, só o que couber.
                                 let tex = icon_tex(&mut self.icons, ui.ctx(), now.icon.as_ref());
-                                let name = now.current.as_deref().unwrap_or("");
-                                program_icon(ui, name, tex);
-                                ui.add(egui::Label::new(name).truncate());
+                                let (rect, _) = ui.allocate_exact_size(vec2(ICON, ICON), Sense::hover());
+                                widget::paint_icon(ui.painter(), rect, name, tex, true);
+                                let gap = ui.spacing().item_spacing.x;
+                                if width_of(ui, name) <= ui.available_width() {
+                                    ui.label(name);
+                                    let state = format!("· {}", now.state.label());
+                                    if width_of(ui, &state) + gap <= ui.available_width() {
+                                        ui.label(egui::RichText::new(state).color(DIM));
+                                    }
+                                }
                             } else {
-                                ui.add(egui::Label::new(egui::RichText::new("sem atividade; o tempo não está sendo contado").color(DIM)).truncate());
+                                // Sem ninguém no computador: a explicação inteira, ou a curta, ou nada.
+                                for text in ["sem atividade; o tempo não está sendo contado", "sem atividade"] {
+                                    if width_of(ui, text) <= ui.available_width() {
+                                        ui.label(egui::RichText::new(text).color(DIM));
+                                        break;
+                                    }
+                                }
                             }
                         });
                     });
@@ -537,6 +529,8 @@ impl MonitorView {
         }
         area.on_hover_text(if tracking {
             "O tempo deste programa está sendo contado, com o widget aberto ou não. Botão direito: renomear, ícone e cor."
+        } else if now.current.is_some() {
+            "O programa está aberto, mas sem uso: o tempo só conta com teclado ou mouse, tela cheia, áudio ou controle."
         } else {
             "Sem atividade há alguns minutos: o tempo volta a contar quando você voltar."
         });
