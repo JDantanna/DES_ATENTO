@@ -10,9 +10,9 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GWL_EXSTYLE, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, IsIconic, SW_HIDE, SW_SHOW,
-    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowLongPtrW, SetWindowPlacement,
-    SetWindowPos, ShowWindow, WINDOWPLACEMENT, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    FindWindowW, GWL_EXSTYLE, GetWindowLongPtrW, GetWindowPlacement, IsIconic, SW_HIDE, SW_SHOW, SW_SHOWMAXIMIZED,
+    SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowLongPtrW,
+    SetWindowPlacement, SetWindowPos, ShowWindow, WINDOWPLACEMENT, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 const OPEN_ID: &str = "navi-open";
@@ -20,7 +20,16 @@ const QUIT_ID: &str = "navi-quit";
 
 static WANT_RESTORE: AtomicBool = AtomicBool::new(false);
 static WANT_QUIT: AtomicBool = AtomicBool::new(false);
-static SAVED: Mutex<Option<[i32; 4]>> = Mutex::new(None);
+static SAVED: Mutex<Option<Saved>> = Mutex::new(None);
+
+/// Canto de onde a janela escondida fica, longe de qualquer monitor.
+const OFFSCREEN: i32 = -32000;
+
+/// Onde a janela estava antes de ir para a bandeja (posição normal, em coordenadas da área de trabalho).
+struct Saved {
+    rect: RECT,
+    maximized: bool,
+}
 
 /// Pedidos feitos pelo ícone da bandeja, a tratar no laço da interface.
 pub enum Request {
@@ -86,42 +95,45 @@ pub fn enter(ctx: &egui::Context, rgba: &[u8]) -> Option<Tray> {
     }));
 
     unsafe {
-        let mut r: RECT = std::mem::zeroed();
-        if IsIconic(hwnd) != 0 {
-            // Minimizada, a janela diz estar em (-32000, -32000): o lugar de verdade é o da posição normal.
-            let mut placement: WINDOWPLACEMENT = std::mem::zeroed();
-            placement.length = size_of::<WINDOWPLACEMENT>() as u32;
-            GetWindowPlacement(hwnd, &mut placement);
-            r = placement.rcNormalPosition;
-        } else {
-            GetWindowRect(hwnd, &mut r);
-        }
+        // O lugar da janela vem sempre de `GetWindowPlacement`, que serve para minimizada ou não e usa as
+        // mesmas coordenadas (da área de trabalho) com que `leave` a devolve. `GetWindowRect` não serve:
+        // minimizada, a janela diz estar em (-32000, -32000).
+        let mut placement: WINDOWPLACEMENT = std::mem::zeroed();
+        placement.length = size_of::<WINDOWPLACEMENT>() as u32;
+        GetWindowPlacement(hwnd, &mut placement);
+        let was_iconic = IsIconic(hwnd) != 0;
+        let normal = placement.rcNormalPosition;
         let mut saved = SAVED.lock().unwrap();
         if saved.is_none() {
-            *saved = Some([r.left, r.top, r.right - r.left, r.bottom - r.top]);
+            *saved = Some(Saved { rect: normal, maximized: placement.showCmd == SW_SHOWMAXIMIZED as u32 });
         }
         // Sem botão na barra de tarefas e fora da tela, mas ainda "visível" para o sistema.
         ShowWindow(hwnd, SW_HIDE);
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (ex | WS_EX_TOOLWINDOW as isize) & !(WS_EX_APPWINDOW as isize));
-        SetWindowPos(hwnd, std::ptr::null_mut(), -32000, -32000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        // Uma janela minimizada não pode ficar assim na bandeja (apareceria como uma barrinha no canto da tela):
-        // já fora da tela e sem botão na barra de tarefas, ela volta ao tamanho normal, sem ser ativada, para o
-        // teclado não ir parar numa janela que ninguém vê.
-        if IsIconic(hwnd) != 0 {
-            let mut placement: WINDOWPLACEMENT = std::mem::zeroed();
-            placement.length = size_of::<WINDOWPLACEMENT>() as u32;
-            if GetWindowPlacement(hwnd, &mut placement) != 0 {
-                placement.showCmd = SW_SHOWNOACTIVATE as u32;
-                SetWindowPlacement(hwnd, &placement);
-            }
+        if was_iconic {
+            // Uma janela minimizada não pode ficar assim na bandeja (apareceria como uma barrinha no canto da
+            // tela), e ao ser restaurada ela iria para a posição normal dela, que é na tela. Então a posição
+            // normal passa a ser fora da tela, e a janela é restaurada sem ser ativada (para o teclado não ir
+            // parar numa janela que ninguém vê). O lugar de verdade fica guardado em `SAVED`.
+            placement.rcNormalPosition = RECT {
+                left: OFFSCREEN,
+                top: OFFSCREEN,
+                right: OFFSCREEN + (normal.right - normal.left),
+                bottom: OFFSCREEN + (normal.bottom - normal.top),
+            };
+            placement.flags = 0;
+            placement.showCmd = SW_SHOWNOACTIVATE as u32;
+            SetWindowPlacement(hwnd, &placement);
+        } else {
+            SetWindowPos(hwnd, std::ptr::null_mut(), OFFSCREEN, OFFSCREEN, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
     }
     Some(Tray { _icon: icon })
 }
 
-/// Traz a janela de volta ao lugar de antes.
+/// Traz a janela de volta ao lugar de antes (e ao tamanho, maximizada ou não).
 pub fn leave() {
     let hwnd = main_window();
     if hwnd.is_null() {
@@ -131,10 +143,22 @@ pub fn leave() {
         ShowWindow(hwnd, SW_HIDE);
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (ex & !(WS_EX_TOOLWINDOW as isize)) | WS_EX_APPWINDOW as isize);
-        if let Some([x, y, _, _]) = SAVED.lock().unwrap().take() {
-            SetWindowPos(hwnd, std::ptr::null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        match SAVED.lock().unwrap().take() {
+            Some(saved) => {
+                // As coordenadas de `SetWindowPlacement` são as mesmas de `GetWindowPlacement`, que guardou o lugar.
+                let mut placement: WINDOWPLACEMENT = std::mem::zeroed();
+                placement.length = size_of::<WINDOWPLACEMENT>() as u32;
+                GetWindowPlacement(hwnd, &mut placement);
+                placement.rcNormalPosition = saved.rect;
+                placement.flags = 0;
+                let show = if saved.maximized { SW_SHOWMAXIMIZED } else { SW_SHOWNORMAL };
+                placement.showCmd = show as u32;
+                SetWindowPlacement(hwnd, &placement);
+            }
+            None => {
+                ShowWindow(hwnd, SW_SHOW);
+            }
         }
-        ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
     }
 }

@@ -276,6 +276,24 @@ pub fn flatten_window(title: &str) -> bool {
     true
 }
 
+/// Faz a janela de título `title` não ser ativada por cliques: usar a janela não tira o foco do programa em
+/// que a pessoa está trabalhando (o widget e a lista de tarefas flutuam sobre ele). Retorna `false` se a janela
+/// ainda não existe.
+pub fn no_activate(title: &str) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_NOACTIVATE};
+
+    let wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
+        if hwnd.is_null() {
+            return false;
+        }
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE as isize);
+    }
+    true
+}
+
 /// Área de trabalho (a tela sem a barra de tarefas) do monitor em que está a janela de título `title`, em pontos
 /// do egui. `None` se a janela ainda não existe. Serve para uma janela que acompanha outra não sair da tela.
 pub fn work_area(title: &str, pixels_per_point: f32) -> Option<Rect> {

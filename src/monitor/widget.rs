@@ -380,8 +380,10 @@ impl MonitorView {
         let mut open_panel = None;
         let mut size = None;
         let mut outer = None;
+        let mut ppp = self.widget_ppp;
         ctx.show_viewport_immediate(id, builder, |ui, _class| {
             ui.set_opacity((fade * opacity).clamp(0.0, 1.0));
+            ppp = ui.ctx().pixels_per_point();
             // Textos não capturam o mouse: arrastar, duplo clique e botão direito valem no widget inteiro.
             ui.style_mut().interaction.selectable_labels = false;
             let full = ui.max_rect();
@@ -431,9 +433,14 @@ impl MonitorView {
         if outer.is_some() {
             self.widget_outer = outer;
         }
-        // A janela só existe a partir do primeiro quadro; então tira a moldura quadrada do Windows.
+        self.widget_ppp = ppp;
+        // A janela só existe a partir do primeiro quadro; então tira a moldura quadrada do Windows
+        // e a faz não tomar o foco quando clicam nela.
         if !first && !self.frame_fixed {
             self.frame_fixed = chrome::flatten_window(WIDGET_TITLE);
+            if self.frame_fixed {
+                chrome::no_activate(WIDGET_TITLE);
+            }
         }
         if acts.toggle_list {
             self.widget_list = !self.widget_list;
@@ -462,7 +469,7 @@ impl MonitorView {
         // Sem saber onde o widget está (o primeiro quadro dele) a lista espera, para não aparecer no lugar errado.
         let outer = self.widget_outer.or_else(|| cfg!(test).then(|| egui::Rect::from_min_size(egui::pos2(24.0, 60.0), format_size(self.prefs.format))));
         let Some(outer) = outer else {
-            ctx.request_repaint();
+            ctx.request_repaint_after(Duration::from_millis(100));
             return;
         };
         ctx.request_repaint_after(Duration::from_secs(1));
@@ -485,7 +492,8 @@ impl MonitorView {
         let size = vec2(outer.width().max(TASKS_MIN_W), TASKS_HEADER_H + body + 10.0);
 
         // Embaixo do widget; se não couber na tela, em cima dele. Sempre dentro da área de trabalho do monitor.
-        let area = chrome::work_area(WIDGET_TITLE, ctx.pixels_per_point());
+        // Os pontos do egui valem de acordo com o DPI do monitor do widget, não o da janela principal.
+        let area = chrome::work_area(WIDGET_TITLE, self.widget_ppp);
         let mut pos = egui::pos2(outer.left(), outer.bottom() + TASKS_GAP);
         if let Some(area) = area {
             if pos.y + size.y > area.bottom() {
@@ -567,6 +575,9 @@ impl MonitorView {
         self.tasks_win.frames = self.tasks_win.frames.saturating_add(1);
         if self.tasks_win.frames >= 2 && !self.tasks_win.flattened {
             self.tasks_win.flattened = chrome::flatten_window(TASKS_TITLE);
+            if self.tasks_win.flattened {
+                chrome::no_activate(TASKS_TITLE);
+            }
         }
         if close {
             self.set_tasks_open(false);

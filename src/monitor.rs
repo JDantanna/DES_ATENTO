@@ -71,6 +71,8 @@ pub struct MonitorView {
     tasks_win: widget::TasksWin,
     /// Onde está a janela do widget na tela, no último quadro desenhado.
     widget_outer: Option<egui::Rect>,
+    /// Pixels por ponto da janela do widget (o monitor dele pode ter outro DPI que o da janela principal).
+    widget_ppp: f32,
     /// O widget está se fechando (esmaecendo).
     closing: bool,
     /// O widget acabou de abrir e deve surgir esmaecendo desde o zero.
@@ -320,6 +322,7 @@ impl MonitorView {
             tasks_open: false,
             tasks_win: widget::TasksWin::default(),
             widget_outer: None,
+            widget_ppp: 1.0,
             closing: false,
             widget_fresh: false,
             frame_fixed: false,
