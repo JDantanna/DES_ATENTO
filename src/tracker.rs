@@ -9,8 +9,14 @@ use serde::{Deserialize, Serialize};
 use crate::appcache::{self, Cache};
 use crate::appname;
 
-const IDLE_SECS: u32 = 300;
+mod engagement;
+mod probe;
+
+pub use engagement::{Evidence, State};
+
 const SAVE_EVERY: u32 = 30;
+/// Com a entrada parada, os sinais passivos (tela cheia, áudio, controle) são lidos a cada tantos segundos.
+const PASSIVE_EVERY_MS: u32 = 5_000;
 
 /// Segundos por programa, agrupados por dia (`AAAA-MM-DD`).
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -49,7 +55,10 @@ struct Shared {
     /// Segundos por programa desde que o app foi aberto.
     session: BTreeMap<String, u64>,
     current: Option<String>,
+    /// O tempo não está sendo contado (`!state.counting()`).
     idle: bool,
+    /// Em uso, só aberto ou ninguém no computador.
+    state: State,
     /// Ícones carregados, pela chave (caminho do executável, `site:dominio` ou `custom:...`).
     icons: HashMap<String, Arc<Icon>>,
     /// O que fica guardado em disco: nomes, apelidos e de onde vem o ícone de cada programa.
@@ -106,9 +115,13 @@ pub struct AppRow {
 }
 
 pub struct Now {
+    /// Programa na frente (`None` quando não há ninguém no computador).
     pub current: Option<String>,
+    /// O tempo não está sendo contado: o mesmo que `!state.counting()`.
     pub idle: bool,
     pub icon: Option<Arc<Icon>>,
+    /// Em uso (e por quê), só aberto, ou sem atividade. `state.label()` dá o texto para a tela.
+    pub state: State,
 }
 
 pub struct Report {
@@ -173,10 +186,32 @@ impl Tracker {
             let mut icon_tried: HashSet<String> = HashSet::new();
             let mut names_tried: HashSet<String> = HashSet::new();
             let mut sites_tried: HashSet<&'static str> = HashSet::new();
+            // Uso de verdade: entrada recente na janela da frente, ou tela cheia, áudio e controle.
+            probe::init();
+            let mut watch = engagement::Watch::default();
+            let mut audio = probe::Audio::default();
+            let mut pad = probe::Pad::default();
+            let mut passive = engagement::Passive::default();
+            let mut passive_at: Option<u32> = None;
             loop {
                 std::thread::sleep(Duration::from_secs(1));
-                let idle = sys::idle_secs() >= IDLE_SECS;
-                let fg = if idle { None } else { sys::foreground() };
+                let now = sys::tick();
+                let last_input = sys::last_input_tick().unwrap_or(now);
+                let fg = sys::foreground();
+                // Os sinais passivos só são lidos com o teclado e o mouse parados, e espaçados.
+                match fg.as_ref().filter(|_| engagement::wants_passive(now, last_input)) {
+                    Some(f) => {
+                        if passive_at.is_none_or(|at| now.wrapping_sub(at) >= PASSIVE_EVERY_MS) {
+                            passive = probe::passive(&f.exe, &mut audio, &mut pad, now);
+                            passive_at = Some(now);
+                        }
+                    }
+                    None => {
+                        passive = engagement::Passive::default();
+                        passive_at = None;
+                    }
+                }
+                let state = watch.observe(now, fg.as_ref().map(|f| f.hwnd), last_input, passive);
                 let site = fg.as_ref().and_then(|f| appname::site_domain(&f.exe, &f.title));
                 let name = fg.as_ref().map(|f| {
                     let product = if appname::needs_product(&f.exe) {
@@ -228,9 +263,11 @@ impl Tracker {
 
                 let mut s = worker.lock().unwrap();
                 s.icons.extend(fresh);
-                s.idle = idle;
-                s.current = name.clone();
-                if let (Some(f), Some(name)) = (fg, name) {
+                s.state = state;
+                s.idle = !state.counting();
+                // Sem ninguém no computador, não há "programa atual"; só aberto, há (a tela diz que não conta).
+                s.current = if state == State::Away { None } else { name.clone() };
+                if let (Some(f), Some(name), true) = (fg, name, state.counting()) {
                     // Site com ícone próprio usa o dele; senão, o do programa (o navegador).
                     // O ícone escolhido pelo usuário não é substituído.
                     if !s.cache.custom_icons.contains_key(&name) {
@@ -328,8 +365,8 @@ impl Tracker {
 
     fn now(s: &Shared) -> Now {
         let current = s.current.clone();
-        let icon = current.as_deref().filter(|_| !s.idle).and_then(|c| s.icon(c));
-        Now { current, idle: s.idle, icon }
+        let icon = current.as_deref().and_then(|c| s.icon(c));
+        Now { current, idle: s.idle, icon, state: s.state }
     }
 
     /// Relatório dos últimos `days` dias; só o que a tela mostra é copiado (nada do histórico inteiro).
@@ -389,20 +426,50 @@ mod sys {
     use super::Icon;
 
     pub struct Foreground {
+        /// Identificador da janela, para notar quando outra vem para a frente.
+        pub hwnd: usize,
         /// Nome do executável sem extensão.
         pub exe: String,
         pub path: String,
         pub title: String,
     }
 
-    pub fn idle_secs() -> u32 {
+    /// Relógio do Windows em milissegundos (dá a volta a cada 49 dias; comparar com `wrapping_sub`).
+    pub fn tick() -> u32 {
+        unsafe { GetTickCount() }
+    }
+
+    /// Instante, nesse relógio, da última tecla ou clique em qualquer janela.
+    pub fn last_input_tick() -> Option<u32> {
         unsafe {
             let mut info = LASTINPUTINFO { cbSize: size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
-            if GetLastInputInfo(&mut info) == 0 {
-                return 0;
-            }
-            GetTickCount().wrapping_sub(info.dwTime) / 1000
+            (GetLastInputInfo(&mut info) != 0).then_some(info.dwTime)
         }
+    }
+
+    /// Caminho completo do executável do processo.
+    fn process_path(pid: u32) -> Option<String> {
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return None;
+            }
+            let mut buf = [0u16; 520];
+            let mut len = buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len);
+            CloseHandle(h);
+            (ok != 0).then(|| String::from_utf16_lossy(&buf[..len as usize]))
+        }
+    }
+
+    fn exe_stem(path: &str) -> Option<String> {
+        let file = path.rsplit('\\').next()?;
+        Some(file.rsplit_once('.').map_or(file, |(stem, _)| stem).to_owned())
+    }
+
+    /// Nome do executável (sem pasta nem extensão) do processo.
+    pub fn process_exe(pid: u32) -> Option<String> {
+        exe_stem(&process_path(pid)?)
     }
 
     fn window_title(hwnd: *mut c_void) -> String {
@@ -423,21 +490,9 @@ mod sys {
             if pid == 0 {
                 return None;
             }
-            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if h.is_null() {
-                return None;
-            }
-            let mut buf = [0u16; 520];
-            let mut len = buf.len() as u32;
-            let ok = QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len);
-            CloseHandle(h);
-            if ok == 0 {
-                return None;
-            }
-            let path = String::from_utf16_lossy(&buf[..len as usize]);
-            let file = path.rsplit('\\').next()?;
-            let exe = file.rsplit_once('.').map_or(file, |(stem, _)| stem).to_owned();
-            Some(Foreground { exe, path, title: window_title(hwnd) })
+            let path = process_path(pid)?;
+            let exe = exe_stem(&path)?;
+            Some(Foreground { hwnd: hwnd as usize, exe, path, title: window_title(hwnd) })
         }
     }
 
@@ -577,6 +632,7 @@ mod tests {
         s.session.insert("Foo".into(), 5);
         s.cache.icon_of.insert("Foo".into(), "foo.exe".into());
         s.current = Some("Foo".into());
+        assert!(!s.state.counting(), "antes da primeira leitura, nada é contado");
 
         s.rename("Foo", "Meu app");
         assert_eq!(s.cache.aliases["Foo"], "Meu app");

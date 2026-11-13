@@ -1,0 +1,211 @@
+//! Sinais passivos de uso, lidos do Windows: programa em tela cheia, áudio saindo do programa
+//! e controle de jogo. São consultados só quando o teclado e o mouse já estão parados há um
+//! tempo (ver `engagement`), então custam nada enquanto a pessoa trabalha.
+
+use std::collections::HashMap;
+use std::ffi::c_void;
+
+use windows_sys::Win32::Foundation::ERROR_DEVICE_NOT_CONNECTED;
+use windows_sys::Win32::Media::Audio::{AudioSessionStateActive, MMDeviceEnumerator, eConsole, eRender};
+use windows_sys::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx};
+use windows_sys::Win32::UI::Input::XboxController::{XINPUT_STATE, XInputGetState};
+use windows_sys::Win32::UI::Shell::{
+    QUNS_APP, QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState,
+};
+use windows_sys::core::{GUID, HRESULT};
+
+use super::engagement::Passive;
+use super::sys;
+
+const IID_IMMDEVICE_ENUMERATOR: GUID = GUID::from_u128(0xa95664d2_9614_4f35_a746_de8db63617e6);
+const IID_IAUDIO_SESSION_MANAGER2: GUID = GUID::from_u128(0x77aa99a0_1bd6_484f_8bc7_2c654c9a9b6f);
+const IID_IAUDIO_SESSION_CONTROL2: GUID = GUID::from_u128(0xbfb7ff88_7239_4fc9_8fa2_07c950be9c6d);
+/// Depois de um controle aparecer desconectado, só é consultado de novo passado este tempo
+/// (perguntar por um controle ausente é lento).
+const PAD_RETRY_MS: u32 = 60_000;
+
+/// Prepara a thread para usar COM (as sessões de áudio). Chamar uma vez, na thread do rastreador.
+pub(super) fn init() {
+    // S_FALSE (já iniciada) também serve; qualquer falha só desliga o sinal de áudio.
+    unsafe {
+        CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED as u32);
+    }
+}
+
+/// O programa da frente está em tela cheia (jogo, vídeo, apresentação)? É o mesmo critério que o
+/// Windows usa para segurar as notificações.
+pub(super) fn fullscreen() -> bool {
+    let mut state = 0;
+    unsafe {
+        SHQueryUserNotificationState(&mut state) >= 0
+            && matches!(state, QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE | QUNS_APP)
+    }
+}
+
+/// Objeto COM cru: a tabela de métodos é lida pela posição, porque o `windows-sys` não traz as
+/// interfaces de áudio. Solta o objeto ao sair de escopo.
+struct Com(*mut c_void);
+
+impl Com {
+    /// Método na posição `index` da tabela virtual (0 a 2 são os de `IUnknown`).
+    unsafe fn method<F: Copy>(&self, index: usize) -> F {
+        unsafe {
+            let vtbl = *(self.0 as *const *const usize);
+            std::mem::transmute_copy::<usize, F>(&*vtbl.add(index))
+        }
+    }
+
+    /// Chama um método que devolve um objeto novo pelo último argumento.
+    unsafe fn child(&self, index: usize, call: impl FnOnce(usize, *mut *mut c_void) -> HRESULT) -> Option<Com> {
+        let mut out: *mut c_void = std::ptr::null_mut();
+        let hr = call(unsafe { self.method::<usize>(index) }, &mut out);
+        (hr >= 0 && !out.is_null()).then_some(Com(out))
+    }
+}
+
+impl Drop for Com {
+    fn drop(&mut self) {
+        unsafe {
+            let release: unsafe extern "system" fn(*mut c_void) -> u32 = self.method(2);
+            release(self.0);
+        }
+    }
+}
+
+type NewObject = unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT;
+type QueryInterface = unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT;
+type DefaultEndpoint = unsafe extern "system" fn(*mut c_void, i32, i32, *mut *mut c_void) -> HRESULT;
+type Activate = unsafe extern "system" fn(*mut c_void, *const GUID, u32, *const c_void, *mut *mut c_void) -> HRESULT;
+type GetSession = unsafe extern "system" fn(*mut c_void, i32, *mut *mut c_void) -> HRESULT;
+type GetI32 = unsafe extern "system" fn(*mut c_void, *mut i32) -> HRESULT;
+type GetU32 = unsafe extern "system" fn(*mut c_void, *mut u32) -> HRESULT;
+
+/// Sessões de áudio do Windows: diz se algum processo de um executável está tocando som.
+#[derive(Default)]
+pub(super) struct Audio {
+    /// Executável (minúsculo, sem extensão) de cada processo já visto. O Windows reaproveita
+    /// números de processo, então a tabela é zerada de tempos em tempos.
+    exe_of: HashMap<u32, Option<String>>,
+}
+
+impl Audio {
+    /// Há som saindo de um processo chamado `exe` (comparação sem maiúsculas)? O navegador toca
+    /// por um processo filho, de número diferente da janela: por isso a comparação é pelo nome.
+    pub(super) fn playing(&mut self, exe: &str) -> bool {
+        if self.exe_of.len() > 128 {
+            self.exe_of.clear();
+        }
+        let exe = exe.to_lowercase();
+        unsafe {
+            let mut raw: *mut c_void = std::ptr::null_mut();
+            let hr = CoCreateInstance(&MMDeviceEnumerator, std::ptr::null_mut(), CLSCTX_ALL, &IID_IMMDEVICE_ENUMERATOR, &mut raw);
+            if hr < 0 || raw.is_null() {
+                return false;
+            }
+            let enumerator = Com(raw);
+            // IMMDeviceEnumerator::GetDefaultAudioEndpoint
+            let Some(device) = enumerator.child(4, |f, out| {
+                let f: DefaultEndpoint = std::mem::transmute(f);
+                f(enumerator.0, eRender, eConsole, out)
+            }) else {
+                return false;
+            };
+            // IMMDevice::Activate(IAudioSessionManager2)
+            let Some(manager) = device.child(3, |f, out| {
+                let f: Activate = std::mem::transmute(f);
+                f(device.0, &IID_IAUDIO_SESSION_MANAGER2, CLSCTX_ALL, std::ptr::null(), out)
+            }) else {
+                return false;
+            };
+            // IAudioSessionManager2::GetSessionEnumerator (depois dos 2 métodos de IAudioSessionManager)
+            let Some(sessions) = manager.child(5, |f, out| {
+                let f: NewObject = std::mem::transmute(f);
+                f(manager.0, out)
+            }) else {
+                return false;
+            };
+            let mut count = 0;
+            let get_count: GetI32 = sessions.method(3);
+            if get_count(sessions.0, &mut count) < 0 {
+                return false;
+            }
+            for i in 0..count {
+                // IAudioSessionEnumerator::GetSession
+                let Some(session) = sessions.child(4, |f, out| {
+                    let f: GetSession = std::mem::transmute(f);
+                    f(sessions.0, i, out)
+                }) else {
+                    continue;
+                };
+                // IAudioSessionControl::GetState: só sessões tocando agora.
+                let mut state = 0;
+                let get_state: GetI32 = session.method(3);
+                if get_state(session.0, &mut state) < 0 || state != AudioSessionStateActive {
+                    continue;
+                }
+                // IUnknown::QueryInterface(IAudioSessionControl2), para saber o processo.
+                let Some(control2) = session.child(0, |f, out| {
+                    let f: QueryInterface = std::mem::transmute(f);
+                    f(session.0, &IID_IAUDIO_SESSION_CONTROL2, out)
+                }) else {
+                    continue;
+                };
+                // IAudioSessionControl2::GetProcessId: 3 de IUnknown + 9 de IAudioSessionControl + 2.
+                let mut pid = 0u32;
+                let get_pid: GetU32 = control2.method(14);
+                if get_pid(control2.0, &mut pid) < 0 || pid == 0 {
+                    continue;
+                }
+                let found = self.exe_of.entry(pid).or_insert_with(|| sys::process_exe(pid).map(|e| e.to_lowercase()));
+                if found.as_deref() == Some(exe.as_str()) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+/// Controles de jogo (XInput): um botão ou analógico mexido muda o número do pacote.
+pub(super) struct Pad {
+    packet: [Option<u32>; 4],
+    /// Instante a partir do qual cada entrada pode ser consultada de novo.
+    retry_at: [u32; 4],
+}
+
+impl Default for Pad {
+    fn default() -> Self {
+        Self { packet: [None; 4], retry_at: [0; 4] }
+    }
+}
+
+impl Pad {
+    /// Algum controle foi mexido desde a última consulta?
+    pub(super) fn moved(&mut self, now: u32) -> bool {
+        let mut moved = false;
+        for i in 0..4 {
+            if (now.wrapping_sub(self.retry_at[i]) as i32) < 0 {
+                continue;
+            }
+            let mut state: XINPUT_STATE = unsafe { std::mem::zeroed() };
+            let result = unsafe { XInputGetState(i as u32, &mut state) };
+            if result != 0 {
+                if result == ERROR_DEVICE_NOT_CONNECTED {
+                    self.retry_at[i] = now.wrapping_add(PAD_RETRY_MS);
+                }
+                self.packet[i] = None;
+                continue;
+            }
+            if self.packet[i].is_some_and(|p| p != state.dwPacketNumber) {
+                moved = true;
+            }
+            self.packet[i] = Some(state.dwPacketNumber);
+        }
+        moved
+    }
+}
+
+/// Lê os três sinais de uma vez, para o programa `exe` que está na frente.
+pub(super) fn passive(exe: &str, audio: &mut Audio, pad: &mut Pad, now: u32) -> Passive {
+    Passive { fullscreen: fullscreen(), audio: audio.playing(exe), controller: pad.moved(now) }
+}
