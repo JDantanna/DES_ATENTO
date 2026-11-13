@@ -30,20 +30,15 @@ pub enum Evidence {
 }
 
 /// O que o rastreador sabe sobre o programa em primeiro plano neste segundo.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum State {
     /// Em uso: o tempo conta.
     Using(Evidence),
     /// Aberto na frente, mas sem uso: o tempo não conta.
     Open,
     /// Ninguém no computador (ou nada na frente).
+    #[default]
     Away,
-}
-
-impl Default for State {
-    fn default() -> Self {
-        State::Away
-    }
 }
 
 impl State {
@@ -53,6 +48,7 @@ impl State {
     }
 
     /// Texto curto para a interface.
+    #[allow(dead_code)]
     pub fn label(self) -> &'static str {
         match self {
             State::Using(Evidence::Input) => "em uso",
@@ -225,6 +221,6 @@ mod tests {
         let t = 1000 * S;
         assert!(!wants_passive(t, t - 10 * S));
         assert!(wants_passive(t, t - (READ_GRACE_SECS - 5) * S));
-        assert!(wants_passive(t, t - 3600 * S));
+        assert!(wants_passive(t, t.wrapping_sub(3600 * S)));
     }
 }

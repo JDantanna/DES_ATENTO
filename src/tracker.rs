@@ -12,6 +12,8 @@ use crate::appname;
 mod engagement;
 mod probe;
 
+// `Evidence` e `State::label` são para a interface mostrar o motivo; o rastreador em si só usa `counting()`.
+#[allow(unused_imports)]
 pub use engagement::{Evidence, State};
 
 const SAVE_EVERY: u32 = 30;
@@ -121,6 +123,7 @@ pub struct Now {
     pub idle: bool,
     pub icon: Option<Arc<Icon>>,
     /// Em uso (e por quê), só aberto, ou sem atividade. `state.label()` dá o texto para a tela.
+    #[allow(dead_code)]
     pub state: State,
 }
 

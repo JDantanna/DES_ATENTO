@@ -167,16 +167,11 @@ impl Audio {
 }
 
 /// Controles de jogo (XInput): um botão ou analógico mexido muda o número do pacote.
+#[derive(Default)]
 pub(super) struct Pad {
     packet: [Option<u32>; 4],
     /// Instante a partir do qual cada entrada pode ser consultada de novo.
     retry_at: [u32; 4],
-}
-
-impl Default for Pad {
-    fn default() -> Self {
-        Self { packet: [None; 4], retry_at: [0; 4] }
-    }
 }
 
 impl Pad {
