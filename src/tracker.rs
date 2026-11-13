@@ -195,18 +195,20 @@ impl Tracker {
             let mut audio = probe::Audio::default();
             let mut pad = probe::Pad::default();
             let mut passive = engagement::Passive::default();
-            let mut passive_at: Option<u32> = None;
+            // Quando e para qual janela os sinais passivos foram lidos pela última vez.
+            let mut passive_at: Option<(u32, usize)> = None;
             loop {
                 std::thread::sleep(Duration::from_secs(1));
                 let now = sys::tick();
                 let last_input = sys::last_input_tick().unwrap_or(now);
                 let fg = sys::foreground();
-                // Os sinais passivos só são lidos com o teclado e o mouse parados, e espaçados.
+                // Os sinais passivos só são lidos com o teclado e o mouse parados, espaçados, e de novo
+                // assim que outra janela vem para a frente (o som da anterior não vale para a nova).
                 match fg.as_ref().filter(|_| engagement::wants_passive(now, last_input)) {
                     Some(f) => {
-                        if passive_at.is_none_or(|at| now.wrapping_sub(at) >= PASSIVE_EVERY_MS) {
-                            passive = probe::passive(&f.exe, &mut audio, &mut pad, now);
-                            passive_at = Some(now);
+                        if passive_at.is_none_or(|(at, hwnd)| hwnd != f.hwnd || now.wrapping_sub(at) >= PASSIVE_EVERY_MS) {
+                            passive = probe::passive(f.hwnd, &f.exe, &mut audio, &mut pad, now);
+                            passive_at = Some((now, f.hwnd));
                         }
                     }
                     None => {

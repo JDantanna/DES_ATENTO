@@ -5,13 +5,15 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 
-use windows_sys::Win32::Foundation::ERROR_DEVICE_NOT_CONNECTED;
+use windows_sys::Win32::Foundation::{ERROR_DEVICE_NOT_CONNECTED, RECT};
+use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow};
 use windows_sys::Win32::Media::Audio::{AudioSessionStateActive, MMDeviceEnumerator, eConsole, eRender};
 use windows_sys::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx};
 use windows_sys::Win32::UI::Input::XboxController::{XINPUT_STATE, XInputGetState};
 use windows_sys::Win32::UI::Shell::{
     QUNS_APP, QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState,
 };
+use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
 use windows_sys::core::{GUID, HRESULT};
 
 use super::engagement::Passive;
@@ -32,13 +34,27 @@ pub(super) fn init() {
     }
 }
 
-/// O programa da frente está em tela cheia (jogo, vídeo, apresentação)? É o mesmo critério que o
-/// Windows usa para segurar as notificações.
-pub(super) fn fullscreen() -> bool {
+/// A janela `hwnd` está em tela cheia (jogo, vídeo, apresentação)? Precisa das duas coisas: o Windows
+/// dizer que há um app de tela cheia (o critério que segura as notificações, mas que vale para o sistema
+/// todo) e a janela da frente cobrir o monitor inteiro (uma janela só maximizada para na barra de tarefas).
+pub(super) fn fullscreen(hwnd: usize) -> bool {
     let mut state = 0;
     unsafe {
-        SHQueryUserNotificationState(&mut state) >= 0
-            && matches!(state, QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE | QUNS_APP)
+        if SHQueryUserNotificationState(&mut state) < 0
+            || !matches!(state, QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE | QUNS_APP)
+        {
+            return false;
+        }
+        let hwnd = hwnd as *mut c_void;
+        let mut window: RECT = std::mem::zeroed();
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = size_of::<MONITORINFO>() as u32;
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if GetWindowRect(hwnd, &mut window) == 0 || GetMonitorInfoW(monitor, &mut info) == 0 {
+            return false;
+        }
+        let m = info.rcMonitor;
+        window.left <= m.left && window.top <= m.top && window.right >= m.right && window.bottom >= m.bottom
     }
 }
 
@@ -200,7 +216,7 @@ impl Pad {
     }
 }
 
-/// Lê os três sinais de uma vez, para o programa `exe` que está na frente.
-pub(super) fn passive(exe: &str, audio: &mut Audio, pad: &mut Pad, now: u32) -> Passive {
-    Passive { fullscreen: fullscreen(), audio: audio.playing(exe), controller: pad.moved(now) }
+/// Lê os três sinais de uma vez, para a janela `hwnd` do programa `exe` que está na frente.
+pub(super) fn passive(hwnd: usize, exe: &str, audio: &mut Audio, pad: &mut Pad, now: u32) -> Passive {
+    Passive { fullscreen: fullscreen(hwnd), audio: audio.playing(exe), controller: pad.moved(now) }
 }

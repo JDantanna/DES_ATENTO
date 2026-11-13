@@ -15,6 +15,9 @@
 pub const READ_GRACE_SECS: u32 = 90;
 /// Sem nada acontecer por este tempo, a pessoa não está mais no computador.
 pub const AWAY_SECS: u32 = 300;
+/// Teto do uso passivo (tela cheia, áudio, controle) sem nenhuma tecla ou clique: cabe um filme longo,
+/// mas não uma noite inteira com a música ligada.
+pub const PASSIVE_MAX_SECS: u32 = 3 * 3600;
 
 /// Por que o programa conta como em uso.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -105,8 +108,10 @@ pub fn wants_passive(now: u32, last_input: u32) -> bool {
 pub struct Watch {
     /// Janela que estava na frente na última observação.
     focus: Option<usize>,
-    /// Instante em que ela veio para a frente.
+    /// Só a entrada feita estritamente depois deste instante é da janela atual.
     focus_since: u32,
+    /// Instante da observação anterior.
+    last_seen: Option<u32>,
 }
 
 impl Watch {
@@ -114,20 +119,31 @@ impl Watch {
     pub fn observe(&mut self, now: u32, focus: Option<usize>, last_input: u32, passive: Passive) -> State {
         let Some(hwnd) = focus else {
             self.focus = None;
+            self.last_seen = Some(now);
             return State::Away;
         };
         if self.focus != Some(hwnd) {
-            // Na primeira observação de todas, a entrada feita antes de o Navi abrir já conta;
-            // depois, só a entrada feita com a janela já na frente.
-            self.focus_since = if self.focus.is_none() && since(last_input, now) < 60_000 { last_input } else { now };
+            self.focus_since = match self.last_seen {
+                // A troca aconteceu entre a observação anterior e esta: o Alt+Tab ou o clique que a fez
+                // também, e já conta para a janela nova. Uma janela que se põe na frente sozinha, sem
+                // entrada nenhuma nesse intervalo, não ganha nada.
+                Some(seen) => seen,
+                // Primeira observação de todas: a entrada feita pouco antes de o Navi abrir já conta.
+                None if since(last_input, now) < 60_000 => last_input.wrapping_sub(1),
+                None => now,
+            };
             self.focus = Some(hwnd);
         }
+        self.last_seen = Some(now);
         let stale = stale_secs(now, last_input);
-        let input_here = since(self.focus_since, last_input) >= 0;
+        let input_here = since(self.focus_since, last_input) > 0;
         if input_here && stale <= READ_GRACE_SECS {
             return State::Using(Evidence::Input);
         }
-        if let Some(e) = passive.evidence() {
+        // Filme ou música valem sem teclado, mas não para sempre: quem saiu de casa com o som ligado parou.
+        if let Some(e) = passive.evidence()
+            && stale < PASSIVE_MAX_SECS
+        {
             return State::Using(e);
         }
         if stale >= AWAY_SECS { State::Away } else { State::Open }
@@ -167,8 +183,22 @@ mod tests {
         assert_eq!(w.observe(t0 + 30 * S, Some(2), t0, Passive::default()), State::Open);
         // A pessoa clica na nova janela: agora é uso dela.
         assert_eq!(w.observe(t0 + 31 * S, Some(2), t0 + 31 * S, Passive::default()), State::Using(Evidence::Input));
-        // E ao voltar para a janela 1 pelo teclado (a tecla vem junto com a troca), continua uso.
-        assert_eq!(w.observe(t0 + 40 * S, Some(1), t0 + 40 * S, Passive::default()), State::Using(Evidence::Input));
+        // E ao voltar para a janela 1 pelo teclado (a tecla vem entre uma observação e outra), continua uso.
+        assert_eq!(w.observe(t0 + 40 * S, Some(1), t0 + 39 * S + 500, Passive::default()), State::Using(Evidence::Input));
+    }
+
+    #[test]
+    fn trocar_de_janela_e_ficar_lendo_conta_para_a_janela_nova() {
+        let mut w = Watch::default();
+        let t0 = 10 * S;
+        assert_eq!(w.observe(t0, Some(1), t0, Passive::default()), State::Using(Evidence::Input));
+        assert_eq!(w.observe(t0 + 10 * S, Some(1), t0, Passive::default()), State::Using(Evidence::Input));
+        // Alt+Tab meio segundo depois da observação anterior: a janela 2 aparece na observação seguinte.
+        let tab = t0 + 10 * S + 500;
+        assert_eq!(w.observe(t0 + 11 * S, Some(2), tab, Passive::default()), State::Using(Evidence::Input));
+        // Um minuto lendo, sem mexer em nada: ainda é uso da janela 2.
+        assert_eq!(w.observe(t0 + 71 * S, Some(2), tab, Passive::default()), State::Using(Evidence::Input));
+        assert_eq!(w.observe(t0 + 102 * S, Some(2), tab, Passive::default()), State::Open);
     }
 
     #[test]
@@ -194,6 +224,10 @@ mod tests {
         assert_eq!(w.observe(late + 2 * S, Some(1), t0, pad), State::Using(Evidence::Controller));
         // Acabou o filme: volta a ser só "sem atividade".
         assert_eq!(w.observe(late + 3 * S, Some(1), t0, Passive::default()), State::Away);
+        // Som ligado há horas sem ninguém tocar no computador: não conta mais.
+        let gone = t0 + PASSIVE_MAX_SECS * S;
+        assert_eq!(w.observe(gone - S, Some(1), t0, AUDIO), State::Using(Evidence::Audio));
+        assert_eq!(w.observe(gone, Some(1), t0, AUDIO), State::Away);
     }
 
     #[test]
