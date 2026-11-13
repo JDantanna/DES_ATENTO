@@ -163,6 +163,10 @@ fn save_colors(colors: &AppColors) {
 
 const PANEL_TITLE: &str = "Navi · Programa";
 const PANEL_W: f32 = 340.0;
+/// Largura que o título do painel tem para escrever o nome (o painel menos as margens e o botão de fechar).
+const PANEL_TITLE_W: f32 = PANEL_W - 28.0 - 36.0 - 14.0;
+/// Altura da linha do título quando ele cabe numa linha só (a do botão de fechar).
+const TITLE_ROW_H: f32 = 28.0;
 /// Altura de cada linha de programa no Monitoramento.
 const ROW_H: f32 = 44.0;
 /// Cinza dos textos secundários do Monitoramento, com contraste suficiente sobre o fundo escuro.
@@ -554,9 +558,17 @@ impl MonitorView {
         let Some(mut p) = self.panel.take() else { return };
         let ctx = ui.ctx().clone();
         let id = egui::ViewportId::from_hash_of("monitor_painel_programa");
+        // Um nome comprido quebra o título em várias linhas: a janela cresce junto, senão os controles saem dela.
+        let title_text = if p.name.is_empty() { "Widget".to_owned() } else { p.name.clone() };
+        let title_h = ctx
+            .layer_painter(egui::LayerId::background())
+            .layout_job(egui::text::LayoutJob::simple(title_text, FontId::proportional(15.0), Color32::WHITE, PANEL_TITLE_W))
+            .size()
+            .y;
+        let height = p.height() + (title_h - TITLE_ROW_H).max(0.0);
         let builder = egui::ViewportBuilder::default()
             .with_title(PANEL_TITLE)
-            .with_inner_size([PANEL_W, p.height()])
+            .with_inner_size([PANEL_W, height])
             .with_position(p.at)
             .with_decorations(false)
             .with_transparent(true)
