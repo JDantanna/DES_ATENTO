@@ -276,6 +276,29 @@ pub fn flatten_window(title: &str) -> bool {
     true
 }
 
+/// Área de trabalho (a tela sem a barra de tarefas) do monitor em que está a janela de título `title`, em pontos
+/// do egui. `None` se a janela ainda não existe. Serve para uma janela que acompanha outra não sair da tela.
+pub fn work_area(title: &str, pixels_per_point: f32) -> Option<Rect> {
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow};
+    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
+
+    let wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
+        if hwnd.is_null() {
+            return None;
+        }
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(monitor, &mut info) == 0 {
+            return None;
+        }
+        let (r, k) = (info.rcWork, pixels_per_point.max(0.1));
+        Some(Rect::from_min_max(egui::pos2(r.left as f32 / k, r.top as f32 / k), egui::pos2(r.right as f32 / k, r.bottom as f32 / k)))
+    }
+}
+
 /// Faixas finas nas bordas e cantos que iniciam o redimensionamento.
 pub fn resize_handles(ui: &mut egui::Ui, full: Rect) {
     let (e, c) = (5.0, 12.0);

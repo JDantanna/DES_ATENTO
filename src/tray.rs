@@ -10,9 +10,9 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GWL_EXSTYLE, GetWindowLongPtrW, GetWindowRect, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
-    SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WS_EX_APPWINDOW,
-    WS_EX_TOOLWINDOW,
+    FindWindowW, GWL_EXSTYLE, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, IsIconic, SW_HIDE, SW_RESTORE, SW_SHOW,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, WINDOWPLACEMENT, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 const OPEN_ID: &str = "navi-open";
@@ -49,6 +49,10 @@ fn main_window() -> HWND {
 
 /// Esconde a janela principal e põe o ícone na bandeja.
 pub fn enter(ctx: &egui::Context, rgba: &[u8]) -> Option<Tray> {
+    // Os testes não mexem na janela do Navi que estiver aberta na máquina de quem os roda.
+    if cfg!(test) {
+        return None;
+    }
     let hwnd = main_window();
     if hwnd.is_null() {
         return None;
@@ -83,7 +87,15 @@ pub fn enter(ctx: &egui::Context, rgba: &[u8]) -> Option<Tray> {
 
     unsafe {
         let mut r: RECT = std::mem::zeroed();
-        GetWindowRect(hwnd, &mut r);
+        if IsIconic(hwnd) != 0 {
+            // Minimizada, a janela diz estar em (-32000, -32000): o lugar de verdade é o da posição normal.
+            let mut placement: WINDOWPLACEMENT = std::mem::zeroed();
+            placement.length = size_of::<WINDOWPLACEMENT>() as u32;
+            GetWindowPlacement(hwnd, &mut placement);
+            r = placement.rcNormalPosition;
+        } else {
+            GetWindowRect(hwnd, &mut r);
+        }
         let mut saved = SAVED.lock().unwrap();
         if saved.is_none() {
             *saved = Some([r.left, r.top, r.right - r.left, r.bottom - r.top]);
@@ -94,6 +106,11 @@ pub fn enter(ctx: &egui::Context, rgba: &[u8]) -> Option<Tray> {
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (ex | WS_EX_TOOLWINDOW as isize) & !(WS_EX_APPWINDOW as isize));
         SetWindowPos(hwnd, std::ptr::null_mut(), -32000, -32000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        // Uma janela minimizada não pode ficar assim na bandeja (apareceria como uma barrinha no canto da tela):
+        // já fora da tela e sem botão na barra de tarefas, ela volta ao tamanho normal.
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
     }
     Some(Tray { _icon: icon })
 }

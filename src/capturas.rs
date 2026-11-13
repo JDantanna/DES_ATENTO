@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use chrono::{Duration, Local, NaiveTime};
 use eframe::egui::{self, Color32, TextureId, epaint::Primitive};
 
-use crate::model::{Repeat, Settings, Store, Subtask};
+use crate::model::{Repeat, Settings, Store, Subtask, WidgetFormat};
 use crate::planner::Mode;
 use crate::splash::Splash;
 use crate::{App, Tab, theme};
@@ -180,6 +180,40 @@ fn widget_abre_ao_minimizar_e_fecha_ao_voltar() {
     assert!(!app.monitor.widget_on(), "voltar fecha o widget");
     run(&mut app, true);
     assert!(app.monitor.widget_on(), "minimizar de novo abre de novo");
+}
+
+/// O widget e a lista de tarefas, em cada formato. No teste as janelas separadas aparecem embutidas na tela
+/// principal (o egui não abre janelas de verdade aqui), o que basta para conferir o desenho de cada uma.
+#[test]
+fn widget_em_todos_os_formatos() {
+    let (w, h) = (900, 560);
+    let mut clock = 500.0;
+    for format in WidgetFormat::ALL {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut atlas = Atlas::new();
+        let (mut store, _) = sample();
+        store.dirty = false;
+        let mut settings = Settings::default();
+        settings.widget_format = Some(format);
+        let mut app = App::with(store, settings, None);
+        app.monitor.open_widget();
+        let name = format!("widget_{}", format.label().to_lowercase().replace('é', "e"));
+        capture(&mut app, &ctx, &mut atlas, &name, w, h, &mut clock);
+        app.monitor.set_tasks_open(true);
+        capture(&mut app, &ctx, &mut atlas, &format!("{name}_tarefas"), w, h, &mut clock);
+    }
+    // Trancado e meio transparente.
+    let ctx = egui::Context::default();
+    theme::apply(&ctx);
+    let mut atlas = Atlas::new();
+    let mut settings = Settings::default();
+    settings.widget_locked = true;
+    settings.widget_opacity = 0.5;
+    settings.normalize();
+    let mut app = App::with(sample().0, settings, None);
+    app.monitor.open_widget();
+    capture(&mut app, &ctx, &mut atlas, "widget_trancado_meio_transparente", w, h, &mut clock);
 }
 
 #[test]

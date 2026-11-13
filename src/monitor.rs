@@ -5,9 +5,12 @@ use std::time::Duration;
 use chrono::{Datelike, Local};
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, vec2};
 
+mod widget;
+
 use crate::theme::{self, ACCENT, BG};
 use crate::tracker::{AppRow, Icon, Tracker};
-use crate::chrome::{self, Glyph};
+use crate::chrome;
+use crate::model::{OPACITY_RANGE, WidgetFormat, WidgetPrefs};
 
 #[derive(PartialEq, Clone, Copy)]
 enum Range {
@@ -28,15 +31,20 @@ impl Range {
 
 const WIDGET_ID: &str = "monitor_widget";
 const WIDGET_TITLE: &str = "Navi · Monitoramento";
-/// Largura de referência do widget (as fontes escalam em relação a ela).
-const WIDGET_W: f32 = 340.0;
-/// Altura do formato pequeno (faixa com o programa e o cronômetro).
-const STRIP_H: f32 = 56.0;
-/// Altura do formato médio, com a lista de programas fechada e aberta.
-const COMPACT_H: f32 = 190.0;
+/// Altura do formato médio com a lista de programas da sessão aberta.
 const LIST_H: f32 = 400.0;
-const MIN_W: f32 = 230.0;
-const MIN_H: f32 = 48.0;
+/// Menor tamanho que a janela do widget aceita (cada formato esconde o que não cabe).
+const MIN_SIZE: egui::Vec2 = vec2(90.0, 24.0);
+
+/// Tamanho de partida de cada formato do widget, em pontos (largura, altura).
+pub fn format_size(format: WidgetFormat) -> egui::Vec2 {
+    match format {
+        WidgetFormat::Barra => vec2(150.0, 30.0),
+        WidgetFormat::Pequeno => vec2(320.0, 56.0),
+        WidgetFormat::Medio => vec2(340.0, 190.0),
+        WidgetFormat::Grande => vec2(460.0, 340.0),
+    }
+}
 /// Nome com que o próprio app aparece no rastreador.
 const APP_NAME: &str = "Navi";
 
@@ -46,14 +54,23 @@ pub struct MonitorView {
     widget_list: bool,
     /// Altura atual da janela do widget (o redimensionamento só é pedido quando ela muda).
     widget_h: f32,
-    /// Largura atual da janela do widget (o usuário pode redimensionar).
+    /// Largura atual da janela do widget (o usuário pode redimensionar, se não estiver trancado).
     widget_w: f32,
     /// Tamanho com que a janela do widget foi criada.
     widget_start: egui::Vec2,
-    /// Formato pequeno (faixa) em vez do médio.
-    small: bool,
-    /// O formato mudou e precisa ser gravado nas preferências.
-    format_changed: bool,
+    /// Formato, trava de tamanho e opacidade do widget.
+    prefs: WidgetPrefs,
+    /// As preferências mudaram e precisam ser gravadas.
+    prefs_changed: bool,
+    /// O formato mudou: a janela volta ao tamanho padrão dele no próximo quadro.
+    resize_now: bool,
+    /// Opacidade do quadro atual (esmaecer de abrir e fechar já incluído), para as janelas que acompanham o widget.
+    fade: f32,
+    /// Lista flutuante das tarefas de hoje, junto do widget.
+    tasks_open: bool,
+    tasks_win: widget::TasksWin,
+    /// Onde está a janela do widget na tela, no último quadro desenhado.
+    widget_outer: Option<egui::Rect>,
     /// O widget está se fechando (esmaecendo).
     closing: bool,
     /// O widget acabou de abrir e deve surgir esmaecendo desde o zero.
@@ -209,7 +226,8 @@ impl Panel {
             h += 215.0;
         }
         if self.from_widget {
-            h += 62.0;
+            // Formato, trancar, opacidade e o botão das tarefas.
+            h += 188.0;
         }
         h
     }
@@ -222,7 +240,7 @@ fn panel_pos(ui: &egui::Ui) -> egui::Pos2 {
         let origin = vp.outer_rect.map_or(egui::Pos2::ZERO, |r| r.min);
         let p = origin + i.pointer.latest_pos().unwrap_or_default().to_vec2() + vec2(8.0, 8.0);
         match vp.monitor_size {
-            Some(m) if p.x < m.x && p.y < m.y => egui::pos2(p.x.min(m.x - PANEL_W - 8.0), p.y.min(m.y - 420.0).max(0.0)),
+            Some(m) if p.x < m.x && p.y < m.y => egui::pos2(p.x.min(m.x - PANEL_W - 8.0), p.y.min(m.y - 560.0).max(0.0)),
             _ => p,
         }
     })
@@ -310,16 +328,22 @@ pub fn clock(secs: u64) -> String {
 }
 
 impl MonitorView {
-    pub fn new(small: bool) -> Self {
+    pub fn new(prefs: WidgetPrefs) -> Self {
+        let start = format_size(prefs.format);
         Self {
             range: Range::Hoje,
             widget: false,
             widget_list: false,
             widget_h: 0.0,
-            widget_w: WIDGET_W,
-            widget_start: vec2(WIDGET_W, COMPACT_H),
-            small,
-            format_changed: false,
+            widget_w: start.x,
+            widget_start: start,
+            prefs,
+            prefs_changed: false,
+            resize_now: false,
+            fade: 1.0,
+            tasks_open: false,
+            tasks_win: widget::TasksWin::default(),
+            widget_outer: None,
             closing: false,
             widget_fresh: false,
             frame_fixed: false,
@@ -363,9 +387,33 @@ impl MonitorView {
         std::mem::take(&mut self.open_app)
     }
 
-    /// O novo formato do widget, se ele acabou de mudar (`true` = pequeno).
-    pub fn take_format_change(&mut self) -> Option<bool> {
-        std::mem::take(&mut self.format_changed).then_some(self.small)
+    /// As preferências do widget, se acabaram de mudar (para gravar).
+    pub fn take_prefs_change(&mut self) -> Option<WidgetPrefs> {
+        std::mem::take(&mut self.prefs_changed).then_some(self.prefs)
+    }
+
+    /// Aplica as escolhas feitas no painel: um formato novo volta ao tamanho padrão dele.
+    fn apply_prefs(&mut self, new: WidgetPrefs) {
+        let opacity = new.opacity.clamp(*OPACITY_RANGE.start(), *OPACITY_RANGE.end());
+        if new.format != self.prefs.format {
+            self.widget_w = format_size(new.format).x;
+            self.resize_now = true;
+            // A lista de programas aberta é coisa do formato médio.
+            self.widget_list = false;
+        }
+        let new = WidgetPrefs { opacity, ..new };
+        if new != self.prefs {
+            self.prefs = new;
+            self.prefs_changed = true;
+        }
+    }
+
+    /// Mostra ou esconde a lista flutuante das tarefas de hoje (some junto com o widget).
+    pub fn set_tasks_open(&mut self, open: bool) {
+        self.tasks_open = open;
+        if !open {
+            self.tasks_win.reset();
+        }
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, tracker: &Tracker) {
@@ -523,9 +571,10 @@ impl MonitorView {
         let mut rename = None;
         let mut pick_icon = false;
         let mut reset_icon = false;
-        let mut set_small = None;
+        let mut prefs = self.prefs;
+        let mut toggle_tasks = false;
+        let tasks_open = self.tasks_open;
         let mut colors_changed = false;
-        let small = self.small;
         let custom = !p.name.is_empty() && tracker.has_custom_icon(&p.name);
         let colors = &mut self.colors;
         ctx.show_viewport_immediate(id, builder, |ui, _class| {
@@ -613,22 +662,33 @@ impl MonitorView {
                 }
                 if p.from_widget {
                     section(ui, "Formato do widget");
-                    ui.horizontal(|ui| {
-                        if ui.selectable_label(small, "Pequeno").clicked() {
-                            set_small = Some(true);
-                        }
-                        if ui.selectable_label(!small, "Médio").clicked() {
-                            set_small = Some(false);
+                    ui.horizontal_wrapped(|ui| {
+                        for f in WidgetFormat::ALL {
+                            if ui.selectable_label(prefs.format == f, f.label()).clicked() {
+                                prefs.format = f;
+                            }
                         }
                     });
+                    ui.checkbox(&mut prefs.locked, "Trancar o tamanho").on_hover_text("Não deixa redimensionar o widget com o mouse");
+                    section(ui, "Opacidade");
+                    let mut percent = (prefs.opacity * 100.0).round();
+                    ui.spacing_mut().slider_width = PANEL_W - 28.0 - 64.0;
+                    if ui.add(egui::Slider::new(&mut percent, 30.0..=100.0).suffix("%").step_by(5.0)).changed() {
+                        prefs.opacity = percent / 100.0;
+                    }
+                    ui.add_space(4.0);
+                    if ui.button(if tasks_open { "Esconder as tarefas de hoje" } else { "Mostrar as tarefas de hoje" }).clicked() {
+                        toggle_tasks = true;
+                    }
                 }
             });
         });
         if colors_changed {
             save_colors(&self.colors);
         }
-        if let Some(s) = set_small {
-            self.set_small(s);
+        self.apply_prefs(prefs);
+        if toggle_tasks {
+            self.set_tasks_open(!self.tasks_open);
         }
         if let Some(new) = rename {
             tracker.rename_app(&p.name, &new);
@@ -656,220 +716,8 @@ impl MonitorView {
             self.panel = Some(p);
         }
     }
-
-    /// Muda o formato do widget, que volta ao tamanho padrão daquele formato.
-    fn set_small(&mut self, small: bool) {
-        if small != self.small {
-            self.small = small;
-            self.format_changed = true;
-            self.widget_w = WIDGET_W;
-        }
-    }
-
-    /// Janela flutuante; deve ser chamada a cada quadro, qualquer que seja a aba.
-    pub fn floating(&mut self, ui: &mut egui::Ui, tracker: &Tracker) {
-        if !self.widget {
-            self.widget_h = 0.0;
-            self.frame_fixed = false;
-            return;
-        }
-        let ctx = ui.ctx().clone();
-        ctx.request_repaint_after(Duration::from_secs(1));
-        // Abre e fecha com o mesmo esmaecer suave do resto do app.
-        let fade_id = ui.scope_id().with("widget_fade");
-        if std::mem::take(&mut self.widget_fresh) {
-            ctx.animate_value_with_time(fade_id, 0.0, 0.0);
-        }
-        let fade = ctx.animate_value_with_time(fade_id, if self.closing { 0.0 } else { 1.0 }, theme::FADE_SECS);
-        if self.closing && fade <= 0.01 {
-            self.widget = false;
-            self.closing = false;
-            return;
-        }
-
-        let data = tracker.widget();
-        let name = if data.now.idle { "Ocioso".to_owned() } else { data.now.current.clone().unwrap_or_else(|| "–".to_owned()) };
-        let cur_tex = icon_tex(&mut self.icons, &ctx, data.now.icon.as_ref());
-        let rows_tex: Vec<Option<egui::TextureId>> =
-            data.session.iter().map(|r| icon_tex(&mut self.icons, &ctx, r.icon.as_ref())).collect();
-        let small = self.small;
-        let height = if small {
-            STRIP_H
-        } else if self.widget_list {
-            LIST_H
-        } else {
-            COMPACT_H
-        };
-
-        let id = egui::ViewportId::from_hash_of(WIDGET_ID);
-        // Só pede novo tamanho quando o formato, a lista ou a escala muda: um comando a cada quadro
-        // mantém a janela repintando sem parar, e o tamanho que o usuário escolheu arrastando não pode ser desfeito.
-        let zoom = ctx.zoom_factor();
-        let first = self.widget_h == 0.0;
-        if (!first && (self.widget_h - height).abs() > f32::EPSILON) || (zoom - self.widget_zoom).abs() > 1e-3 {
-            ctx.send_viewport_cmd_to(id, egui::ViewportCommand::InnerSize(vec2(self.widget_w, height)));
-        }
-        self.widget_h = height;
-        // No primeiro quadro a janela ainda não existe; o comando só vale a partir do próximo.
-        if first {
-            self.widget_start = vec2(self.widget_w, height);
-        } else {
-            self.widget_zoom = zoom;
-        }
-
-        // O tamanho aqui é só o inicial e fica fixo: o egui reenvia o tamanho sempre que este valor muda,
-        // o que brigaria com o redimensionamento feito pelo usuário.
-        let builder = egui::ViewportBuilder::default()
-            .with_title(WIDGET_TITLE)
-            .with_inner_size(self.widget_start)
-            .with_min_inner_size([MIN_W, MIN_H])
-            .with_decorations(false)
-            .with_transparent(true)
-            .with_always_on_top()
-            // Surge sem roubar o foco de quem estiver em uso quando o Navi é minimizado.
-            .with_active(false)
-            .with_resizable(true);
-        let mut close = false;
-        let mut toggle_list = false;
-        let mut open_app = false;
-        let mut size = None;
-        let mut set_small = None;
-        let open = self.widget_list;
-        // Sem nada sendo rastreado (ocioso ou sem programa), o widget fica vermelho.
-        let tracking = !data.now.idle && data.now.current.is_some();
-        let tracked_name = if tracking { data.now.current.clone() } else { None };
-        // Cor de fundo escolhida para o programa em uso (botão direito no widget ou no Monitoramento).
-        let program = tracked_name.as_deref().and_then(|n| self.colors.get(n)).copied();
-        let mut open_panel = None;
-        let (fill, time_color) = if tracking {
-            (program.map_or(BG, |[r, g, b]| BG.lerp_to_gamma(Color32::from_rgb(r, g, b), 0.5)), ACCENT)
-        } else {
-            (Color32::from_rgb(58, 20, 24), Color32::from_rgb(255, 120, 120))
-        };
-        ctx.show_viewport_immediate(id, builder, |ui, _class| {
-            ui.set_opacity(fade);
-            // Textos não capturam o mouse: arrastar, duplo clique e botão direito valem no widget inteiro.
-            ui.style_mut().interaction.selectable_labels = false;
-            let full = ui.max_rect();
-            size = Some(full.size());
-
-            let drag = ui.interact(full, ui.scope_id().with("widget_drag"), Sense::click_and_drag());
-            // Com o mouse em cima, o widget clareia um pouco, como se uma luz o iluminasse.
-            let glow = ui.ctx().animate_bool_with_time(ui.scope_id().with("widget_glow"), drag.contains_pointer(), 0.2);
-            let lit = fill.lerp_to_gamma(Color32::from_rgb(170, 190, 255), 0.13 * glow);
-            ui.painter().rect_filled(full, chrome::RADIUS, lit);
-            let edge = if tracking {
-                Stroke::new(1.0, Color32::from_white_alpha(22 + (60.0 * glow) as u8))
-            } else {
-                Stroke::new(1.5, Color32::from_rgb(214, 70, 70).lerp_to_gamma(Color32::from_rgb(255, 130, 130), glow))
-            };
-            ui.painter().rect_stroke(full, chrome::RADIUS, edge, egui::StrokeKind::Inside);
-            chrome::resize_handles(ui, full);
-
-            if drag.drag_started() {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-            }
-            if drag.double_clicked() {
-                open_app = true;
-            }
-            if drag.secondary_clicked() {
-                open_panel = Some(panel_pos(ui));
-            }
-            // A fonte do relógio acompanha o tamanho da janela.
-            let k = (full.width() / WIDGET_W).clamp(0.7, 2.4);
-            let time_text = |size: f32| egui::RichText::new(clock(data.app_secs)).monospace().strong().size(size).color(time_color);
-            let margin = if small { egui::Margin::symmetric(12, 0) } else { egui::Margin::same(14) };
-            egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(margin)).show(ui, |ui| {
-                // Formato pequeno: uma faixa só com o programa e o cronômetro.
-                if small {
-                    ui.horizontal_centered(|ui| {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            close |= chrome::close_button(ui).clicked();
-                            if chrome::icon_button(ui, Glyph::ChevronDown, 0.0).on_hover_text("Formato médio").clicked() {
-                                set_small = Some(false);
-                            }
-                            ui.label(time_text((22.0 * k).min(full.height() * 0.6)));
-                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                if cur_tex.is_some() || name == APP_NAME {
-                                    program_icon(ui, &name, cur_tex);
-                                }
-                                ui.add(egui::Label::new(egui::RichText::new(&name).strong()).truncate());
-                            });
-                        });
-                    });
-                    return;
-                }
-                ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        close |= chrome::close_button(ui).clicked();
-                        if chrome::icon_button(ui, Glyph::ChevronUp, 0.0).on_hover_text("Formato pequeno").clicked() {
-                            set_small = Some(true);
-                        }
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            if cur_tex.is_some() || name == APP_NAME {
-                                program_icon(ui, &name, cur_tex);
-                            }
-                            ui.add(egui::Label::new(egui::RichText::new(&name).strong()).truncate());
-                        });
-                    });
-                });
-                ui.vertical_centered(|ui| {
-                    ui.add_space(2.0 * k);
-                    ui.label(time_text((34.0 * k).min(full.height() * 0.3)));
-                    ui.weak(format!("Hoje, no total: {}", clock(data.total)));
-                    ui.add_space(2.0);
-                    let label = format!("{} Programas desta sessão ({})", if open { "–" } else { "+" }, data.session.len());
-                    if ui.add(egui::Button::new(label).frame(false)).clicked() {
-                        toggle_list = true;
-                    }
-                });
-                if open {
-                    egui::ScrollArea::vertical().max_height(ui.available_height()).show(ui, |ui| {
-                        if data.session.is_empty() {
-                            ui.weak("Nenhum programa registrado ainda.");
-                        }
-                        for (row, tex) in data.session.iter().zip(&rows_tex) {
-                            ui.horizontal(|ui| {
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.weak(clock(row.secs));
-                                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                        app_icon(ui, *tex);
-                                        ui.add(egui::Label::new(egui::RichText::new(&row.name).strong()).truncate());
-                                    });
-                                });
-                            });
-                        }
-                    });
-                }
-            });
-        });
-        if let Some(s) = size {
-            self.widget_w = s.x.max(MIN_W);
-        }
-        if let Some(s) = set_small {
-            self.set_small(s);
-        }
-        // A janela só existe a partir do primeiro quadro; então tira a moldura quadrada do Windows.
-        if !first && !self.frame_fixed {
-            self.frame_fixed = chrome::flatten_window(WIDGET_TITLE);
-        }
-        if toggle_list {
-            self.widget_list = !self.widget_list;
-        }
-        if let Some(at) = open_panel {
-            self.panel = Some(Panel::new(tracked_name.unwrap_or_default(), true, at));
-        }
-        if open_app {
-            self.open_app = true;
-            self.closing = true;
-        }
-        // Fechar o widget também abre o app.
-        if close {
-            self.open_app = true;
-            self.closing = true;
-        }
-    }
 }
+
 fn chart(ui: &mut egui::Ui, days: &[(chrono::NaiveDate, u64)]) {
     let today = Local::now().date_naive();
     let h = 110.0;

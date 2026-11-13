@@ -39,6 +39,8 @@ const TABS_INLINE_W: f32 = 740.0;
 const TABS_INLINE_BUSY_W: f32 = 940.0;
 /// Gravação das tarefas: espera este tempo depois da primeira mudança, para não gravar a cada tecla.
 const SAVE_DELAY_SECS: f64 = 1.0;
+/// O mesmo para as preferências do widget (opacidade, formato, trava).
+const PREFS_SAVE_DELAY_SECS: f64 = 0.6;
 /// Quanto o fechamento do app espera pelo último backup (a unidade da nuvem pode estar lenta).
 const EXIT_BACKUP_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -59,7 +61,6 @@ pub(crate) struct App {
     tracker: Tracker,
     updater: Updater,
     tray: Option<tray::Tray>,
-    ask_minimize: bool,
     /// Mostra a pergunta "sair ou ir para a bandeja?" ao fechar.
     ask_close: bool,
     /// A saída já foi confirmada: o pedido de fechar passa direto.
@@ -70,6 +71,8 @@ pub(crate) struct App {
     restore_pending: Option<backup::Prepared>,
     /// Desde quando há mudanças nas tarefas ainda não gravadas (no relógio da interface).
     dirty_since: Option<f64>,
+    /// Quando as preferências do widget mudaram pela última vez e ainda não foram gravadas (relógio da interface).
+    prefs_dirty_at: Option<f64>,
     scale_dirty: bool,
     /// Etapa da volta da bandeja com esmaecer (0 = nenhuma).
     restore_stage: u8,
@@ -101,17 +104,17 @@ impl App {
             store,
             tasks: TasksView::new(),
             planner: Planner::new(),
-            monitor: MonitorView::new(settings.widget_small),
+            monitor: MonitorView::new(settings.widget_prefs()),
             tracker: Tracker::start(),
             updater: Updater::default(),
             tray: None,
-            ask_minimize: false,
             ask_close: false,
             quitting: false,
             settings,
             backup: backup::Backup::new(),
             restore_pending: None,
             dirty_since: None,
+            prefs_dirty_at: None,
             scale_dirty: false,
             restore_stage: 0,
             frame_fixed: false,
@@ -268,25 +271,39 @@ impl App {
         fairy::draw(ui.painter(), rect.center(), 30.0 * (1.0 + 0.25 * grow), 0.0, 0.3 + 0.7 * grow);
     }
 
-    /// Aplica a escolha de minimizar (bandeja ou só minimizar).
-    fn minimize_to(&mut self, ctx: &egui::Context, to_tray: bool) {
-        if to_tray {
-            self.go_tray(ctx);
-        } else {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-        }
-    }
-
     /// O widget acompanha a janela principal: abre quando ela sai de cena, por qualquer caminho
     /// (botão, Win+D, barra de tarefas ou bandeja), e fecha quando ela volta.
+    /// Com o widget aberto o Navi fica só na bandeja: uma janela minimizada de outro jeito que não o botão
+    /// (Win+D, o botão da barra de tarefas) também vai para lá, e some da barra de tarefas.
     fn sync_widget(&mut self, ctx: &egui::Context) {
-        let away = self.tray.is_some() || ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        let away = self.tray.is_some() || minimized;
         if away != self.was_away {
             self.was_away = away;
             if away {
                 self.monitor.open_widget();
+                if self.tray.is_none() {
+                    self.go_tray(ctx);
+                }
             } else {
                 self.monitor.close_widget();
+            }
+        }
+    }
+
+    /// Grava as preferências do widget só depois de um instante sem mudar (arrastar a opacidade muda a cada quadro).
+    fn prefs_tick(&mut self, ctx: &egui::Context) {
+        let time = ctx.input(|i| i.time);
+        if let Some(prefs) = self.monitor.take_prefs_change() {
+            self.settings.set_widget_prefs(prefs);
+            self.prefs_dirty_at = Some(time);
+        }
+        if let Some(at) = self.prefs_dirty_at {
+            if time - at >= PREFS_SAVE_DELAY_SECS {
+                self.prefs_dirty_at = None;
+                self.settings.save();
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(PREFS_SAVE_DELAY_SECS));
             }
         }
     }
@@ -417,40 +434,10 @@ impl App {
             Some(Choice::Quit) => self.quit(ctx),
             Some(Choice::Tray) => {
                 self.ask_close = false;
-                self.minimize_to(ctx, true);
+                self.go_tray(ctx);
             }
             Some(Choice::Cancel) => self.ask_close = false,
             None => {}
-        }
-    }
-
-    fn minimize_dialog(&mut self, ctx: &egui::Context) {
-        let mut choice = None;
-        egui::Window::new("Minimizar o Navi")
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.label("Para onde o Navi deve ir?");
-                ui.weak("Pergunto só desta vez. Clique com o botão direito no botão de minimizar para mudar.");
-                ui.add_space(6.0);
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Bandeja do sistema").clicked() {
-                        choice = Some(true);
-                    }
-                    if ui.button("Só minimizar").clicked() {
-                        choice = Some(false);
-                    }
-                    if ui.add(egui::Button::new("Cancelar").frame(false)).clicked() {
-                        self.ask_minimize = false;
-                    }
-                });
-            });
-        if let Some(to_tray) = choice {
-            self.ask_minimize = false;
-            self.settings.minimize_to_tray = Some(to_tray);
-            self.settings.save();
-            self.minimize_to(ctx, to_tray);
         }
     }
 
@@ -501,15 +488,10 @@ impl App {
                     if chrome::window_button(ui, g).clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
                     }
-                    let min = chrome::window_button(ui, chrome::Glyph::Minimize).on_hover_text("Clique com o botão direito para escolher de novo");
+                    // Minimizar manda o Navi para a bandeja (o widget abre e o app sai da barra de tarefas).
+                    let min = chrome::window_button(ui, chrome::Glyph::Minimize).on_hover_text("Minimizar para a bandeja");
                     if min.clicked() {
-                        match self.settings.minimize_to_tray {
-                            Some(to_tray) => self.minimize_to(&ctx, to_tray),
-                            None => self.ask_minimize = true,
-                        }
-                    }
-                    if min.secondary_clicked() {
-                        self.ask_minimize = true;
+                        self.go_tray(&ctx);
                     }
                     ui.add_space(8.0);
                     self.scale_menu(ui);
@@ -606,6 +588,7 @@ impl App {
 
         self.sync_widget(&ctx);
         self.monitor.floating(ui, &self.tracker);
+        self.monitor.tasks_window(ui, &mut self.store);
         self.monitor.panel(ui, &self.tracker);
         if self.monitor.take_opened() {
             self.go_tray(&ctx);
@@ -613,13 +596,7 @@ impl App {
         if self.monitor.take_open_app() {
             self.restore(&ctx);
         }
-        if let Some(small) = self.monitor.take_format_change() {
-            self.settings.widget_small = small;
-            self.settings.save();
-        }
-        if self.ask_minimize {
-            self.minimize_dialog(&ctx);
-        }
+        self.prefs_tick(&ctx);
         if self.ask_close {
             self.close_dialog(&ctx);
         }
@@ -649,6 +626,9 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if self.prefs_dirty_at.take().is_some() {
+            self.settings.save();
+        }
         self.save_store();
         self.tracker.save_now();
         match self.restore_pending.take() {

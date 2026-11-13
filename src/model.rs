@@ -295,6 +295,22 @@ impl Store {
         self.dirty = true;
     }
 
+    /// Tarefas pendentes que pedem atenção hoje, como índices: as atrasadas primeiro, depois as de hoje
+    /// por hora (as sem hora no fim).
+    pub fn today_pending(&self, today: NaiveDate, now: NaiveDateTime) -> Vec<usize> {
+        let mut v: Vec<usize> = (0..self.tasks.len())
+            .filter(|&i| {
+                let t = &self.tasks[i];
+                !t.done && (t.overdue(now) || t.occurs_on(today))
+            })
+            .collect();
+        v.sort_by_key(|&i| {
+            let t = &self.tasks[i];
+            (!t.overdue(now), t.date, t.time.is_none(), t.time, t.id)
+        });
+        v
+    }
+
     pub fn all_tags(&self) -> Vec<String> {
         let mut v: Vec<String> = self.tasks.iter().flat_map(|t| t.tags.iter().cloned()).collect();
         v.sort_by_key(|t| t.to_lowercase());
@@ -459,6 +475,43 @@ mod tests {
     }
 
     #[test]
+    fn lista_de_hoje_poe_atrasadas_primeiro_e_ordena_por_hora() {
+        let today = NaiveDate::from_ymd_opt(2026, 5, 10).unwrap();
+        let now = today.and_hms_opt(12, 0, 0).unwrap();
+        let mut s = Store::default();
+        let ids: Vec<u64> = ["sem hora", "tarde", "cedo", "ontem", "feita", "amanhã"].iter().map(|t| s.add((*t).into(), Some(today))).collect();
+        s.tasks[1].time = NaiveTime::from_hms_opt(18, 0, 0);
+        s.tasks[2].time = NaiveTime::from_hms_opt(13, 0, 0);
+        s.tasks[3].date = NaiveDate::from_ymd_opt(2026, 5, 9);
+        s.tasks[4].done = true;
+        s.tasks[5].date = NaiveDate::from_ymd_opt(2026, 5, 11);
+        let titles: Vec<&str> = s.today_pending(today, now).into_iter().map(|i| s.tasks[i].title.as_str()).collect();
+        assert_eq!(titles, ["ontem", "cedo", "tarde", "sem hora"]);
+        let _ = ids;
+    }
+
+    #[test]
+    fn widget_migra_do_formato_antigo_e_limita_a_opacidade() {
+        let mut s: Settings = serde_json::from_str("{\"widget_small\": true}").unwrap();
+        s.normalize();
+        assert_eq!(s.widget_format, Some(WidgetFormat::Pequeno));
+        let mut s: Settings = serde_json::from_str("{}").unwrap();
+        s.normalize();
+        assert_eq!(s.widget_prefs(), WidgetPrefs { format: WidgetFormat::Medio, locked: false, opacity: 1.0 });
+        // Uma escolha nova vale mais que o campo antigo, e a opacidade fica entre 30% e 100%.
+        let mut s: Settings = serde_json::from_str("{\"widget_small\": true, \"widget_format\": \"Grande\", \"widget_opacity\": 0.05}").unwrap();
+        s.normalize();
+        assert_eq!(s.widget_format, Some(WidgetFormat::Grande));
+        assert!((s.widget_opacity - 0.3).abs() < 1e-6);
+        s.widget_opacity = f32::NAN;
+        s.normalize();
+        assert_eq!(s.widget_opacity, 1.0);
+        // Gravar e ler de volta mantém a escolha.
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.widget_format, Some(WidgetFormat::Grande));
+    }
+
+    #[test]
     fn desfazer_devolve_a_tarefa_ao_lugar() {
         let mut s = Store::default();
         let ids: Vec<u64> = ["a", "b", "c"].iter().map(|t| s.add((*t).into(), None)).collect();
@@ -516,18 +569,64 @@ mod tests {
     }
 }
 
+/// Formatos padrão do widget flutuante, do mais fino ao maior.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum WidgetFormat {
+    /// Faixa fina: só o ícone do programa e o cronômetro.
+    Barra,
+    /// Faixa com o programa, o cronômetro e os botões.
+    Pequeno,
+    #[default]
+    Medio,
+    Grande,
+}
+
+impl WidgetFormat {
+    pub const ALL: [WidgetFormat; 4] = [WidgetFormat::Barra, WidgetFormat::Pequeno, WidgetFormat::Medio, WidgetFormat::Grande];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            WidgetFormat::Barra => "Barra",
+            WidgetFormat::Pequeno => "Pequeno",
+            WidgetFormat::Medio => "Médio",
+            WidgetFormat::Grande => "Grande",
+        }
+    }
+}
+
+/// Escolhas do widget que ficam gravadas: formato, tamanho trancado e opacidade.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct WidgetPrefs {
+    pub format: WidgetFormat,
+    /// Trancado: não dá para redimensionar a janela do widget.
+    pub locked: bool,
+    /// De 0.3 (bem transparente) a 1.0 (opaco).
+    pub opacity: f32,
+}
+
+/// Opacidade mínima do widget: abaixo disso ele some da tela e ninguém acha de novo.
+pub const OPACITY_RANGE: std::ops::RangeInclusive<f32> = 0.3..=1.0;
+
 /// Preferências do app (`settings.json`).
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct Settings {
-    /// Escolha do botão de minimizar: `Some(true)` bandeja, `Some(false)` só minimizar, `None` perguntar.
+    /// Antigo: o botão de minimizar perguntava bandeja ou só minimizar. Agora minimizar vai sempre para a
+    /// bandeja (com o widget aberto o Navi não fica na barra de tarefas); o campo só é lido de arquivos antigos.
     pub minimize_to_tray: Option<bool>,
     /// Escala da interface (1.0 = 100%).
     pub scale: f32,
     /// O aviso "continua na bandeja" já foi mostrado (só aparece na primeira vez).
     pub tray_notice_shown: bool,
-    /// O widget usa o formato pequeno (faixa) em vez do médio.
+    /// Antigo: o widget usava o formato pequeno. Só é lido de arquivos antigos, para migrar para `widget_format`.
+    #[serde(skip_serializing)]
     pub widget_small: bool,
+    /// Formato do widget; `None` em arquivos antigos (vale então o campo `widget_small`).
+    pub widget_format: Option<WidgetFormat>,
+    /// Widget com o tamanho trancado.
+    pub widget_locked: bool,
+    /// Opacidade do widget (0.3 a 1.0).
+    pub widget_opacity: f32,
     /// Pasta dos backups (normalmente sincronizada com a nuvem). `None` = backup desligado.
     pub backup_dir: Option<PathBuf>,
     /// Quando o último backup deu certo.
@@ -536,7 +635,17 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { minimize_to_tray: None, scale: 1.0, tray_notice_shown: false, widget_small: false, backup_dir: None, last_backup: None }
+        Self {
+            minimize_to_tray: None,
+            scale: 1.0,
+            tray_notice_shown: false,
+            widget_small: false,
+            widget_format: None,
+            widget_locked: false,
+            widget_opacity: 1.0,
+            backup_dir: None,
+            last_backup: None,
+        }
     }
 }
 
@@ -547,10 +656,31 @@ impl Settings {
         data_dir().join("settings.json")
     }
 
+    /// Coloca os valores lidos do arquivo dentro do que o app aceita e migra o que veio de versões antigas.
+    pub fn normalize(&mut self) {
+        self.scale = if self.scale.is_finite() { self.scale.clamp(*SCALE_RANGE.start(), *SCALE_RANGE.end()) } else { 1.0 };
+        self.widget_opacity =
+            if self.widget_opacity.is_finite() { self.widget_opacity.clamp(*OPACITY_RANGE.start(), *OPACITY_RANGE.end()) } else { 1.0 };
+        if self.widget_format.is_none() {
+            self.widget_format = Some(if self.widget_small { WidgetFormat::Pequeno } else { WidgetFormat::Medio });
+        }
+        self.widget_small = false;
+    }
+
+    pub fn widget_prefs(&self) -> WidgetPrefs {
+        WidgetPrefs { format: self.widget_format.unwrap_or_default(), locked: self.widget_locked, opacity: self.widget_opacity }
+    }
+
+    pub fn set_widget_prefs(&mut self, prefs: WidgetPrefs) {
+        self.widget_format = Some(prefs.format);
+        self.widget_locked = prefs.locked;
+        self.widget_opacity = prefs.opacity;
+    }
+
     pub fn load() -> Self {
         let mut s: Self =
             std::fs::read_to_string(Self::path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        s.scale = if s.scale.is_finite() { s.scale.clamp(*SCALE_RANGE.start(), *SCALE_RANGE.end()) } else { 1.0 };
+        s.normalize();
         s
     }
 
