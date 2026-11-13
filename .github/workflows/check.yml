@@ -33,20 +33,6 @@ jobs:
             }
           }
           exit $code
-      # Se os testes falharam (ou o programa de testes caiu, como num acesso inválido), roda cada teste sozinho
-      # para dizer qual é o culpado: o resumo do cargo não traz o nome quando o processo morre.
-      - name: Qual teste falha
-        if: failure()
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-          $env:CARGO_TERM_COLOR = 'never'
-          $names = cargo test --release -- --list 2>$null | ForEach-Object { if ("$_" -match '^(.+): test$') { $Matches[1] } }
-          foreach ($n in $names) {
-            cargo test --release $n -- --exact *> $null
-            if ($LASTEXITCODE -ne 0) { Write-Output "::error::Teste que falha sozinho: $n (codigo $LASTEXITCODE)" }
-          }
-          exit 0
       # Revisão automática do código: aponta o que melhorar, sem reprovar o envio.
       - name: Clippy
         if: always()

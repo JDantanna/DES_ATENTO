@@ -16,10 +16,10 @@ const BTN_W: f32 = 26.0;
 const TASKS_TITLE: &str = "Navi · Tarefas de hoje";
 /// Espaço entre o widget e a lista de tarefas.
 const TASKS_GAP: f32 = 6.0;
-const TASKS_HEADER_H: f32 = 40.0;
+const TASKS_HEADER_H: f32 = 44.0;
 const TASK_ROW_H: f32 = 38.0;
-/// Quantas tarefas cabem na lista antes de ela passar a rolar.
-const TASKS_MAX_ROWS: usize = 7;
+/// Quantas tarefas a janela mostra antes de passar a rolar (menos, se a tela não der).
+const TASKS_MAX_ROWS: usize = 10;
 const TASKS_MIN_W: f32 = 270.0;
 /// Quanto a janela da lista pode ficar transparente (ela precisa continuar legível).
 const TASKS_MIN_OPACITY: f32 = 0.85;
@@ -57,7 +57,11 @@ pub(super) fn paint_icon(p: &egui::Painter, rect: egui::Rect, name: &str, tex: O
 /// O que as peças do widget precisam saber para se desenhar.
 struct Look<'a> {
     name: &'a str,
+    /// Nome com que o ícone é escolhido: sem ninguém no computador é o do próprio Navi (a fada), nunca uma letra.
+    icon_name: &'a str,
     tex: Option<egui::TextureId>,
+    /// O mouse está sobre o widget (a barra só mostra a seta das tarefas assim).
+    hover: bool,
     clock: &'a str,
     time_color: Color32,
     tasks_open: bool,
@@ -144,7 +148,9 @@ fn strip(ui: &mut egui::Ui, full: egui::Rect, look: &Look, opts: &StripOpts, act
     if show_close {
         spare -= BTN_W + GAP;
     }
-    let show_tasks = opts.tasks && spare >= BTN_W + GAP;
+    // Na barra a seta das tarefas não tem lugar fixo: aparece por cima, só com o mouse sobre ela.
+    let overlay_tasks = opts.tasks && !opts.name;
+    let show_tasks = opts.tasks && !overlay_tasks && spare >= BTN_W + GAP;
     let mut right = full.right() - PAD;
     if show_close {
         if mini_button(ui, egui::pos2(right - BTN_W / 2.0, cy), chrome::Glyph::Close, "Fechar o widget e abrir o Navi", "fechar").clicked() {
@@ -161,7 +167,7 @@ fn strip(ui: &mut egui::Ui, full: egui::Rect, look: &Look, opts: &StripOpts, act
     }
     let zone = egui::Rect::from_min_max(egui::pos2(full.left() + PAD, full.top()), egui::pos2(right, full.bottom()));
 
-    let has = has_icon(look.name, look.tex);
+    let has = has_icon(look.icon_name, look.tex);
     let icon_slot = if has { isz + GAP } else { 0.0 };
     let name_room = zone.width() - icon_slot - clock_w - 2.0 * GAP;
     let name = if opts.name { fit_text(&p, look.name, FontId::proportional(14.0), TEXT, name_room) } else { None };
@@ -171,7 +177,7 @@ fn strip(ui: &mut egui::Ui, full: egui::Rect, look: &Look, opts: &StripOpts, act
             // Ícone e nome à esquerda, cronômetro à direita.
             let mut x = zone.left();
             if has {
-                paint_icon(&p, icon_at(x), look.name, look.tex, false);
+                paint_icon(&p, icon_at(x), look.icon_name, look.tex, false);
                 x += isz + GAP;
             }
             let (h, name_w) = (galley.size().y, galley.size().x);
@@ -182,11 +188,25 @@ fn strip(ui: &mut egui::Ui, full: egui::Rect, look: &Look, opts: &StripOpts, act
         }
         None => {
             // O nome não cabe (ou é a barra): só o ícone, junto do cronômetro, no meio do espaço livre.
-            let x0 = zone.center().x - (isz + GAP + clock_w) / 2.0;
+            let total = isz + GAP + clock_w;
+            let mut x0 = zone.center().x - total / 2.0;
+            if overlay_tasks {
+                // O par ícone e cronômetro não passa por baixo da seta (mesmo escondida, para nada pular ao passar o mouse).
+                let limit = full.right() - BTN_W - 6.0;
+                if x0 + total > limit {
+                    x0 = (limit - total).max(zone.left());
+                }
+            }
             let icon = icon_at(x0);
-            paint_icon(&p, icon, look.name, look.tex, true);
+            paint_icon(&p, icon, look.icon_name, look.tex, true);
             ui.interact(icon, ui.scope_id().with("icone"), Sense::hover()).on_hover_text(look.tip());
             p.galley(egui::pos2(x0 + isz + GAP, cy - clock.size().y / 2.0), clock, look.time_color);
+        }
+    }
+    if overlay_tasks && look.hover {
+        let glyph = if look.tasks_open { chrome::Glyph::ChevronUp } else { chrome::Glyph::ChevronDown };
+        if mini_button(ui, egui::pos2(full.right() - BTN_W / 2.0 - 4.0, cy), glyph, "Tarefas de hoje", "tarefas").clicked() {
+            acts.toggle_tasks = true;
         }
     }
 }
@@ -210,13 +230,13 @@ fn header_row(ui: &mut egui::Ui, rect: egui::Rect, look: &Look, acts: &mut Acts)
         right -= BTN_W;
     }
     let isz = 20.0;
-    let has = has_icon(look.name, look.tex);
+    let has = has_icon(look.icon_name, look.tex);
     let slot = if has { isz + GAP } else { 0.0 };
     let icon = egui::Rect::from_min_size(egui::pos2(rect.left(), cy - isz / 2.0), vec2(isz, isz));
     match fit_text(&p, look.name, FontId::proportional(15.0), TEXT, right - 4.0 - rect.left() - slot) {
         Some(galley) => {
             if has {
-                paint_icon(&p, icon, look.name, look.tex, false);
+                paint_icon(&p, icon, look.icon_name, look.tex, false);
             }
             let (h, name_w) = (galley.size().y, galley.size().x);
             p.galley(egui::pos2(rect.left() + slot, cy - h / 2.0), galley, TEXT);
@@ -224,7 +244,7 @@ fn header_row(ui: &mut egui::Ui, rect: egui::Rect, look: &Look, acts: &mut Acts)
             paint_state(&p, look, x, cy, right - 4.0 - x);
         }
         None => {
-            paint_icon(&p, icon, look.name, look.tex, true);
+            paint_icon(&p, icon, look.icon_name, look.tex, true);
             ui.interact(icon, ui.scope_id().with("icone"), Sense::hover()).on_hover_text(look.tip());
         }
     }
@@ -322,6 +342,8 @@ impl MonitorView {
         // Com um programa na frente (em uso ou só aberto) aparece o nome dele e o motivo do estado; sem ninguém
         // no computador, "Sem atividade".
         let name = data.now.current.clone().unwrap_or_else(|| "Sem atividade".to_owned());
+        // Sem programa na frente o ícone é a fada do Navi (nunca a inicial de "Sem atividade").
+        let icon_name = if data.now.current.is_some() { name.clone() } else { APP_NAME.to_owned() };
         let state_label = data.now.current.is_some().then(|| data.now.state.label());
         let cur_tex = icon_tex(&mut self.icons, &ctx, data.now.icon.as_ref());
         let rows_tex: Vec<Option<egui::TextureId>> =
@@ -417,7 +439,17 @@ impl MonitorView {
             }
             // A fonte acompanha o tamanho da janela.
             let k = (full.width() / base.x).clamp(0.7, 2.4);
-            let look = Look { name: &name, tex: cur_tex, clock: &clock_text, time_color, tasks_open, state: state_label, k };
+            let look = Look {
+                name: &name,
+                icon_name: &icon_name,
+                tex: cur_tex,
+                hover: drag.contains_pointer(),
+                clock: &clock_text,
+                time_color,
+                tasks_open,
+                state: state_label,
+                k,
+            };
             match format {
                 // A barra só mostra ícone e cronômetro, mais a seta das tarefas.
                 WidgetFormat::Barra => strip(ui, full, &look, &StripOpts { name: false, close: false, tasks: true }, &mut acts),
@@ -487,13 +519,18 @@ impl MonitorView {
         // As que acabaram de ser concluídas por aqui ficam no fim, riscadas, até a lista fechar (dá para desfazer).
         lines.extend(done_ids.iter().filter_map(|id| store.tasks.iter().find(|t| t.id == *id)).map(|t| TaskLine::of(t, now, true)));
 
-        let shown = lines.len().min(TASKS_MAX_ROWS);
-        let body = if lines.is_empty() { 44.0 } else { shown as f32 * TASK_ROW_H };
-        let size = vec2(outer.width().max(TASKS_MIN_W), TASKS_HEADER_H + body + 10.0);
-
-        // Embaixo do widget; se não couber na tela, em cima dele. Sempre dentro da área de trabalho do monitor.
         // Os pontos do egui valem de acordo com o DPI do monitor do widget, não o da janela principal.
         let area = chrome::work_area(WIDGET_TITLE, self.widget_ppp);
+        // A janela cresce até caber todas as tarefas; só passa a rolar além de um limite (ou quando a tela não dá).
+        let max_rows = area.map_or(TASKS_MAX_ROWS, |a| {
+            let room = a.height() - outer.height() - 2.0 * TASKS_GAP - TASKS_HEADER_H - 24.0;
+            ((room / TASK_ROW_H).floor().max(0.0) as usize).clamp(3, TASKS_MAX_ROWS)
+        });
+        let shown = lines.len().min(max_rows);
+        let body = if lines.is_empty() { 44.0 } else { shown as f32 * TASK_ROW_H };
+        let size = vec2(outer.width().max(TASKS_MIN_W), TASKS_HEADER_H + body + 16.0);
+
+        // Embaixo do widget; se não couber na tela, em cima dele. Sempre dentro da área de trabalho do monitor.
         let mut pos = egui::pos2(outer.left(), outer.bottom() + TASKS_GAP);
         if let Some(area) = area {
             if pos.y + size.y > area.bottom() {

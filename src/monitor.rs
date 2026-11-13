@@ -598,7 +598,8 @@ impl MonitorView {
                         close |= chrome::close_button(ui).clicked();
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             let title = if p.name.is_empty() { "Widget" } else { p.name.as_str() };
-                            ui.add(egui::Label::new(egui::RichText::new(title).strong().size(15.0)).truncate());
+                            // O nome nunca termina em "…": um nome comprido quebra a linha.
+                            ui.add(egui::Label::new(egui::RichText::new(title).strong().size(15.0)).wrap());
                         });
                     });
                 });
