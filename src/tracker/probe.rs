@@ -7,7 +7,7 @@ use std::ffi::c_void;
 
 use windows_sys::Win32::Foundation::{ERROR_DEVICE_NOT_CONNECTED, RECT};
 use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow};
-use windows_sys::Win32::Media::Audio::{AudioSessionStateActive, MMDeviceEnumerator, eConsole, eRender};
+use windows_sys::Win32::Media::Audio::{AudioSessionStateActive, DEVICE_STATE_ACTIVE, MMDeviceEnumerator, eConsole, eRender};
 use windows_sys::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx};
 use windows_sys::Win32::UI::Input::XboxController::{XINPUT_STATE, XInputGetState};
 use windows_sys::Win32::UI::Shell::{
@@ -98,6 +98,7 @@ impl Drop for Com {
 type NewObject = unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT;
 type QueryInterface = unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT;
 type DefaultEndpoint = unsafe extern "system" fn(*mut c_void, i32, i32, *mut *mut c_void) -> HRESULT;
+type EnumEndpoints = unsafe extern "system" fn(*mut c_void, i32, u32, *mut *mut c_void) -> HRESULT;
 type Activate = unsafe extern "system" fn(*mut c_void, *const GUID, u32, *const c_void, *mut *mut c_void) -> HRESULT;
 type GetSession = unsafe extern "system" fn(*mut c_void, i32, *mut *mut c_void) -> HRESULT;
 type GetI32 = unsafe extern "system" fn(*mut c_void, *mut i32) -> HRESULT;
@@ -127,6 +128,23 @@ impl Audio {
                 return false;
             }
             let enumerator = Com(raw);
+            // IMMDeviceEnumerator::EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE): sem nenhuma saída de áudio
+            // ativa (máquina sem placa de som, serviço de áudio parado) não há o que ouvir, e pedir o dispositivo
+            // padrão nessa situação derruba o processo em alguns Windows (visto no servidor de testes).
+            let Some(outputs) = enumerator.child(3, |f, out| {
+                let f: EnumEndpoints = std::mem::transmute(f);
+                f(enumerator.0, eRender, DEVICE_STATE_ACTIVE, out)
+            }) else {
+                trace("sem lista de saídas de áudio");
+                return false;
+            };
+            let mut outputs_count = 0u32;
+            let get_outputs: GetU32 = outputs.method(3);
+            if get_outputs(outputs.0, &mut outputs_count) < 0 || outputs_count == 0 {
+                trace("nenhuma saída de áudio ativa");
+                return false;
+            }
+            trace(&format!("{outputs_count} saídas de áudio ativas"));
             // IMMDeviceEnumerator::GetDefaultAudioEndpoint
             let Some(device) = enumerator.child(4, |f, out| {
                 let f: DefaultEndpoint = std::mem::transmute(f);
