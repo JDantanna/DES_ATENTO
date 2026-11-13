@@ -220,3 +220,73 @@ impl Pad {
 pub(super) fn passive(hwnd: usize, exe: &str, audio: &mut Audio, pad: &mut Pad, now: u32) -> Passive {
     Passive { fullscreen: fullscreen(hwnd), audio: audio.playing(exe), controller: pad.moved(now) }
 }
+
+/// Cada sonda roda num processo filho (o próprio executável de testes, filtrado para um teste só): se o Windows
+/// derrubar o processo, o teste pai conta isso como falha com o nome da sonda, em vez de levar a suíte inteira.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CHILD: &str = "NAVI_SONDA_FILHO";
+
+    fn in_child() -> bool {
+        std::env::var_os(CHILD).is_some()
+    }
+
+    fn run_in_child(test: &str) {
+        let exe = std::env::current_exe().expect("caminho do executável de testes");
+        let out = std::process::Command::new(exe)
+            .args(["--exact", &format!("tracker::probe::tests::{test}"), "--test-threads=1", "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .expect("rodar o processo filho");
+        assert!(
+            out.status.success(),
+            "{test}: o processo filho terminou com {:?}\n{}\n{}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn sonda_janela_da_frente() {
+        if !in_child() {
+            return run_in_child("sonda_janela_da_frente");
+        }
+        let fg = sys::foreground();
+        println!("frente: {:?}", fg.as_ref().map(|f| (&f.exe, &f.title)));
+        println!("tick {} entrada {:?}", sys::tick(), sys::last_input_tick());
+        println!("meu exe: {:?}", sys::process_exe(std::process::id()));
+    }
+
+    #[test]
+    fn sonda_tela_cheia() {
+        if !in_child() {
+            return run_in_child("sonda_tela_cheia");
+        }
+        let hwnd = sys::foreground().map_or(0, |f| f.hwnd);
+        println!("tela cheia: {}", fullscreen(hwnd));
+    }
+
+    #[test]
+    fn sonda_audio() {
+        if !in_child() {
+            return run_in_child("sonda_audio");
+        }
+        init();
+        let mut audio = Audio::default();
+        println!("áudio: {}", audio.playing("chrome"));
+        println!("áudio de novo: {}", audio.playing("navi"));
+    }
+
+    #[test]
+    fn sonda_controle() {
+        if !in_child() {
+            return run_in_child("sonda_controle");
+        }
+        let mut pad = Pad::default();
+        let now = sys::tick();
+        println!("controle: {} {}", pad.moved(now), pad.moved(now.wrapping_add(5_000)));
+    }
+}

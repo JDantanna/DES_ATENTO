@@ -204,7 +204,8 @@ impl Tracker {
                 let fg = sys::foreground();
                 // Os sinais passivos só são lidos com o teclado e o mouse parados, espaçados, e de novo
                 // assim que outra janela vem para a frente (o som da anterior não vale para a nova).
-                match fg.as_ref().filter(|_| engagement::wants_passive(now, last_input)) {
+                // Nos testes, o laço não sonda a máquina de quem os roda (as sondas têm testes próprios).
+                match fg.as_ref().filter(|_| !cfg!(test) && engagement::wants_passive(now, last_input)) {
                     Some(f) => {
                         if passive_at.is_none_or(|(at, hwnd)| hwnd != f.hwnd || now.wrapping_sub(at) >= PASSIVE_EVERY_MS) {
                             passive = probe::passive(f.hwnd, &f.exe, &mut audio, &mut pad, now);
